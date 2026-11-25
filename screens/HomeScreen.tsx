@@ -1,63 +1,69 @@
 import React, { useState } from 'react';
 import {
-    View,
+    Alert,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
-    ScrollView,
-    StyleSheet,
-    Alert,
-    Modal
+    View,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { db } from '../database/db';
 import { ScreenWrapper } from '../components/ScreenWrapper';
+import { AppHeader } from '../components/AppHeader';
 import { AnimatedSegmentedControl } from '../components/AnimatedSegmentedControl';
+import { APP_FONT_FAMILY } from '../constants/colors';
+import { useTheme } from '../constants/theme';
+
+const OVERS_PRESETS = ['6', '10', '12', '16', '20'];
 
 export default function HomeScreen() {
     const navigation = useNavigation<any>();
+    const { theme } = useTheme();
+
     const [hostTeam, setHostTeam] = useState('');
     const [visitorTeam, setVisitorTeam] = useState('');
     const [tossWinner, setTossWinner] = useState<'Host' | 'Visitor' | null>(null);
     const [optTo, setOptTo] = useState<'Bat' | 'Bowl' | null>(null);
     const [overs, setOvers] = useState('16');
 
-    // Player Names State
     const [showPlayerModal, setShowPlayerModal] = useState(false);
     const [strikerName, setStrikerName] = useState('');
     const [nonStrikerName, setNonStrikerName] = useState('');
     const [bowlerName, setBowlerName] = useState('');
 
     const handleInitialStart = () => {
-        if (!hostTeam || !visitorTeam || !tossWinner || !optTo || !overs) {
-            Alert.alert('Error', 'Please fill all fields');
+        const parsedOvers = parseInt(overs, 10);
+        if (!hostTeam.trim() || !visitorTeam.trim() || !tossWinner || !optTo || !overs || Number.isNaN(parsedOvers) || parsedOvers <= 0) {
+            Alert.alert('Missing Details', 'Enter both team names, toss winner, decision, and valid overs.');
             return;
         }
         setShowPlayerModal(true);
     };
 
     const confirmStartMatch = async () => {
-        if (!strikerName || !nonStrikerName || !bowlerName) {
-            Alert.alert('Error', 'Please enter all three player names');
+        if (!strikerName.trim() || !nonStrikerName.trim() || !bowlerName.trim()) {
+            Alert.alert('Missing Players', 'Please enter all three opening player names.');
             return;
         }
 
         setShowPlayerModal(false);
 
         try {
-            // 1. Insert Teams
             const insertTeam = (name: string) => {
-                const result = db.runSync('INSERT INTO Teams (name, logo_color) VALUES (?, ?)', name, '#000000');
+                const result = db.runSync('INSERT INTO Teams (name, logo_color) VALUES (?, ?)', name.trim(), theme.scoreboxBg);
                 return result.lastInsertRowId;
             };
 
             const homeTeamId = insertTeam(hostTeam);
             const awayTeamId = insertTeam(visitorTeam);
-
             const tossWinnerId = tossWinner === 'Host' ? homeTeamId : awayTeamId;
 
-            // 2. Insert Match
             const result = db.runSync(
                 `INSERT INTO Matches (
           tournament_id, home_team_id, away_team_id, toss_winner_id, opt_to, overs, is_completed
@@ -67,13 +73,12 @@ export default function HomeScreen() {
                 awayTeamId,
                 tossWinnerId,
                 optTo,
-                parseInt(overs),
+                parseInt(overs, 10),
                 0
             );
 
             const matchId = result.lastInsertRowId;
 
-            // 3. Insert Specific Players
             let batTeamId: number, bowlTeamId: number;
             if (optTo === 'Bat') {
                 batTeamId = tossWinner === 'Host' ? homeTeamId : awayTeamId;
@@ -83,12 +88,11 @@ export default function HomeScreen() {
                 bowlTeamId = tossWinner === 'Host' ? homeTeamId : awayTeamId;
             }
 
-            const sRes = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', strikerName, batTeamId);
-            const nsRes = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', nonStrikerName, batTeamId);
-            const bRes = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', bowlerName, bowlTeamId);
+            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', strikerName.trim(), batTeamId);
+            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', nonStrikerName.trim(), batTeamId);
+            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', bowlerName.trim(), bowlTeamId);
 
             navigation.navigate('Scoring', { matchId });
-
         } catch (error) {
             console.error(error);
             Alert.alert('Error', 'Failed to start match');
@@ -96,258 +100,384 @@ export default function HomeScreen() {
     };
 
     return (
-        <ScreenWrapper>
-            {/* Header */}
-            <Text style={styles.headerTitle}>New Match</Text>
+        <ScreenWrapper noPadding>
+            <AppHeader title="New Match" subtitle="Quick fixture · Offline SQLite" />
 
-            <ScrollView contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
+            <KeyboardAvoidingView
+                style={styles.flex}
+                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            >
+                <ScrollView
+                    contentContainerStyle={styles.contentContainer}
+                    showsVerticalScrollIndicator={false}
+                    keyboardShouldPersistTaps="handled"
+                >
+                    {/* Teams Block */}
+                    <View style={styles.sectionContainer}>
+                        <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>TEAMS</Text>
+                        <View
+                            style={[
+                                styles.surfaceCard,
+                                { backgroundColor: theme.surface, borderColor: theme.border },
+                            ]}
+                        >
+                            <View style={styles.inputRow}>
+                                <Text style={[styles.inputTag, { color: theme.textSecondary }]}>HOST</Text>
+                                <TextInput
+                                    style={[styles.solidInput, { color: theme.textPrimary }]}
+                                    placeholder="Host team name"
+                                    placeholderTextColor={theme.textPlaceholder}
+                                    value={hostTeam}
+                                    onChangeText={setHostTeam}
+                                />
+                            </View>
+                            <View style={[styles.solidSeparator, { backgroundColor: theme.borderSubtle }]} />
+                            <View style={styles.inputRow}>
+                                <Text style={[styles.inputTag, { color: theme.textSecondary }]}>VISITOR</Text>
+                                <TextInput
+                                    style={[styles.solidInput, { color: theme.textPrimary }]}
+                                    placeholder="Visitor team name"
+                                    placeholderTextColor={theme.textPlaceholder}
+                                    value={visitorTeam}
+                                    onChangeText={setVisitorTeam}
+                                />
+                            </View>
+                        </View>
+                    </View>
 
-                {/* Teams Section */}
-                <View style={styles.sectionContainer}>
-                    <Text style={styles.sectionLabel}>TEAMS</Text>
-                    <View style={styles.surfaceCard}>
-                        <TextInput
-                            style={styles.solidInput}
-                            placeholder="Host Team Name"
-                            placeholderTextColor="#888"
-                            value={hostTeam}
-                            onChangeText={setHostTeam}
-                        />
-                        <View style={styles.solidSeparator} />
-                        <TextInput
-                            style={styles.solidInput}
-                            placeholder="Visitor Team Name"
-                            placeholderTextColor="#888"
-                            value={visitorTeam}
-                            onChangeText={setVisitorTeam}
+                    {/* Toss Winner Block */}
+                    <View style={styles.sectionContainer}>
+                        <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>TOSS WON BY</Text>
+                        <AnimatedSegmentedControl
+                            options={[
+                                { label: hostTeam.trim() || 'Host' },
+                                { label: visitorTeam.trim() || 'Visitor' },
+                            ]}
+                            selectedIndex={tossWinner === 'Host' ? 0 : tossWinner === 'Visitor' ? 1 : -1}
+                            onChange={(index) => setTossWinner(index === 0 ? 'Host' : 'Visitor')}
                         />
                     </View>
-                </View>
 
-                {/* Toss Section */}
-                <View style={styles.sectionContainer}>
-                    <Text style={styles.sectionLabel}>TOSS WON BY</Text>
-                    <AnimatedSegmentedControl
-                        options={[
-                            { label: hostTeam || 'Host' },
-                            { label: visitorTeam || 'Visitor' }
+                    {/* Opted To Block */}
+                    <View style={styles.sectionContainer}>
+                        <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>OPTED TO</Text>
+                        <AnimatedSegmentedControl
+                            options={[
+                                {
+                                    label: 'Bat',
+                                    icon: (isActive) => (
+                                        <MaterialIcons
+                                            name="sports-cricket"
+                                            size={18}
+                                            color={isActive ? theme.onPrimary : theme.textSecondary}
+                                            style={{ marginRight: 6 }}
+                                        />
+                                    ),
+                                },
+                                {
+                                    label: 'Bowl',
+                                    icon: (isActive) => (
+                                        <MaterialCommunityIcons
+                                            name="tennis-ball"
+                                            size={18}
+                                            color={isActive ? theme.onPrimary : theme.textSecondary}
+                                            style={{ marginRight: 6 }}
+                                        />
+                                    ),
+                                },
+                            ]}
+                            selectedIndex={optTo === 'Bat' ? 0 : optTo === 'Bowl' ? 1 : -1}
+                            onChange={(index) => setOptTo(index === 0 ? 'Bat' : 'Bowl')}
+                        />
+                    </View>
+
+                    {/* Overs Block */}
+                    <View style={styles.sectionContainer}>
+                        <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>OVERS</Text>
+                        <View style={styles.presetRow}>
+                            {OVERS_PRESETS.map((preset) => {
+                                const selected = overs === preset;
+                                return (
+                                    <TouchableOpacity
+                                        key={preset}
+                                        onPress={() => setOvers(preset)}
+                                        activeOpacity={0.8}
+                                        style={[
+                                            styles.presetChip,
+                                            {
+                                                backgroundColor: selected ? theme.primary : theme.surface,
+                                                borderColor: selected ? theme.primary : theme.border,
+                                            },
+                                        ]}
+                                    >
+                                        <Text
+                                            style={[
+                                                styles.presetText,
+                                                { color: selected ? theme.onPrimary : theme.textPrimary },
+                                            ]}
+                                        >
+                                            {preset}
+                                        </Text>
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </View>
+                        <View
+                            style={[
+                                styles.oversInputWrap,
+                                { backgroundColor: theme.surface, borderColor: theme.border },
+                            ]}
+                        >
+                            <Text style={[styles.inputTag, { color: theme.textSecondary }]}>CUSTOM</Text>
+                            <TextInput
+                                style={[styles.solidInput, styles.tabularNum, { color: theme.textPrimary }]}
+                                placeholder="16"
+                                keyboardType="numeric"
+                                placeholderTextColor={theme.textPlaceholder}
+                                value={overs}
+                                onChangeText={setOvers}
+                            />
+                            <Text style={[styles.oversUnit, { color: theme.textSecondary }]}>overs</Text>
+                        </View>
+                    </View>
+
+                    {/* Primary CTA */}
+                    <TouchableOpacity
+                        style={[styles.primaryCta, { backgroundColor: theme.primary }]}
+                        onPress={handleInitialStart}
+                        activeOpacity={0.85}
+                    >
+                        <Text style={[styles.primaryCtaText, { color: theme.onPrimary }]}>START MATCH</Text>
+                    </TouchableOpacity>
+                </ScrollView>
+            </KeyboardAvoidingView>
+
+            {/* Opening Players Modal */}
+            <Modal
+                visible={showPlayerModal}
+                animationType="fade"
+                transparent
+                onRequestClose={() => setShowPlayerModal(false)}
+            >
+                <KeyboardAvoidingView
+                    style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}
+                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                >
+                    <View
+                        style={[
+                            styles.modalContent,
+                            { backgroundColor: theme.surface, borderColor: theme.border },
                         ]}
-                        selectedIndex={tossWinner === 'Host' ? 0 : tossWinner === 'Visitor' ? 1 : -1}
-                        onChange={(index) => setTossWinner(index === 0 ? 'Host' : 'Visitor')}
-                    />
-                </View>
+                    >
+                        <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Opening Players</Text>
 
-                {/* Decision Section */}
-                <View style={styles.sectionContainer}>
-                    <Text style={styles.sectionLabel}>OPTED TO</Text>
-                    <AnimatedSegmentedControl
-                        options={[
-                            { 
-                                label: 'Bat',
-                                icon: (isActive) => <MaterialIcons name="sports-cricket" size={18} color={isActive ? '#FFFFFF' : '#9EABB8'} style={{ marginRight: 6 }} />
-                            },
-                            { 
-                                label: 'Bowl',
-                                icon: (isActive) => <MaterialCommunityIcons name="tennis-ball" size={18} color={isActive ? '#FFFFFF' : '#9EABB8'} style={{ marginRight: 6 }} />
-                            }
-                        ]}
-                        selectedIndex={optTo === 'Bat' ? 0 : optTo === 'Bowl' ? 1 : -1}
-                        onChange={(index) => setOptTo(index === 0 ? 'Bat' : 'Bowl')}
-                    />
-                </View>
-
-                {/* Overs Section */}
-                <View style={styles.sectionContainer}>
-                    <Text style={styles.sectionLabel}>OVERS</Text>
-                    <TextInput
-                        style={styles.solidInputSingle}
-                        placeholder="16"
-                        keyboardType="numeric"
-                        placeholderTextColor="#888"
-                        value={overs}
-                        onChangeText={setOvers}
-                    />
-                </View>
-
-                {/* Initial Start Button */}
-                <TouchableOpacity style={styles.primaryCta} onPress={handleInitialStart} activeOpacity={0.8}>
-                    <Text style={styles.primaryCtaText}>START MATCH</Text>
-                </TouchableOpacity>
-
-                <View style={{ height: 80 }} />
-            </ScrollView>
-
-            {/* Player Selection Modal */}
-            <Modal visible={showPlayerModal} animationType="fade" transparent>
-                <View style={styles.modalOverlay}>
-                    <View style={styles.modalContent}>
-                        <Text style={styles.modalTitle}>Enter Opening Players</Text>
-
-                        <Text style={styles.modalLabel}>Striker Name</Text>
+                        <Text style={[styles.modalLabel, { color: theme.textSecondary }]}>STRIKER</Text>
                         <TextInput
-                            style={styles.modalInput}
+                            style={[
+                                styles.modalInput,
+                                {
+                                    backgroundColor: theme.surfaceSubtle,
+                                    borderColor: theme.border,
+                                    color: theme.textPrimary,
+                                },
+                            ]}
                             value={strikerName}
                             onChangeText={setStrikerName}
-                            placeholder="Striker Name"
-                            placeholderTextColor="#888"
+                            placeholder="Enter striker name"
+                            placeholderTextColor={theme.textPlaceholder}
                         />
 
-                        <Text style={styles.modalLabel}>Non-Striker Name</Text>
+                        <Text style={[styles.modalLabel, { color: theme.textSecondary }]}>NON-STRIKER</Text>
                         <TextInput
-                            style={styles.modalInput}
+                            style={[
+                                styles.modalInput,
+                                {
+                                    backgroundColor: theme.surfaceSubtle,
+                                    borderColor: theme.border,
+                                    color: theme.textPrimary,
+                                },
+                            ]}
                             value={nonStrikerName}
                             onChangeText={setNonStrikerName}
-                            placeholder="Non-Striker Name"
-                            placeholderTextColor="#888"
+                            placeholder="Enter non-striker name"
+                            placeholderTextColor={theme.textPlaceholder}
                         />
 
-                        <Text style={styles.modalLabel}>Bowler Name</Text>
+                        <Text style={[styles.modalLabel, { color: theme.textSecondary }]}>OPENING BOWLER</Text>
                         <TextInput
-                            style={styles.modalInput}
+                            style={[
+                                styles.modalInput,
+                                {
+                                    backgroundColor: theme.surfaceSubtle,
+                                    borderColor: theme.border,
+                                    color: theme.textPrimary,
+                                },
+                            ]}
                             value={bowlerName}
                             onChangeText={setBowlerName}
-                            placeholder="Bowler Name"
-                            placeholderTextColor="#888"
+                            placeholder="Enter bowler name"
+                            placeholderTextColor={theme.textPlaceholder}
                         />
 
                         <TouchableOpacity
-                            style={[styles.primaryCta, { marginTop: 10, borderRadius: 12 }]}
+                            style={[styles.primaryCta, { backgroundColor: theme.primary, marginTop: 8 }]}
                             onPress={confirmStartMatch}
-                            activeOpacity={0.8}
+                            activeOpacity={0.85}
                         >
-                            <Text style={styles.primaryCtaText}>BEGIN SCORING</Text>
+                            <Text style={[styles.primaryCtaText, { color: theme.onPrimary }]}>BEGIN SCORING</Text>
                         </TouchableOpacity>
 
-                        <TouchableOpacity style={styles.modalCancel} onPress={() => setShowPlayerModal(false)}>
-                            <Text style={styles.modalCancelText}>Cancel</Text>
+                        <TouchableOpacity
+                            style={styles.modalCancel}
+                            onPress={() => setShowPlayerModal(false)}
+                        >
+                            <Text style={[styles.modalCancelText, { color: theme.textSecondary }]}>Cancel</Text>
                         </TouchableOpacity>
                     </View>
-                </View>
+                </KeyboardAvoidingView>
             </Modal>
         </ScreenWrapper>
     );
 }
 
-const CYAN_ACCENT = '#15A3C7';
-const SURFACE_DARK = '#1E252B';
-const BORDER_COLOR = '#2C353D';
-
 const styles = StyleSheet.create({
-    contentContainer: {
-        paddingBottom: 120,
+    flex: {
+        flex: 1,
     },
-    headerTitle: {
-        fontSize: 34,
-        fontWeight: 'bold',
-        color: '#fff',
-        marginBottom: 24,
+    contentContainer: {
+        padding: 16,
+        paddingBottom: 112,
     },
     sectionContainer: {
-        marginBottom: 24,
+        marginBottom: 20,
     },
     sectionLabel: {
+        fontFamily: APP_FONT_FAMILY,
         fontSize: 12,
-        color: '#9EABB8',
         marginBottom: 8,
-        fontWeight: 'bold',
-        letterSpacing: 1,
+        fontWeight: '800',
+        letterSpacing: 0.8,
         textTransform: 'uppercase',
     },
     surfaceCard: {
-        backgroundColor: SURFACE_DARK,
-        borderRadius: 16,
+        borderRadius: 12,
         borderWidth: 1,
-        borderColor: BORDER_COLOR,
         overflow: 'hidden',
     },
+    inputRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 14,
+        minHeight: 52,
+    },
+    inputTag: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 11,
+        fontWeight: '800',
+        letterSpacing: 0.6,
+        width: 66,
+    },
     solidInput: {
-        fontSize: 18,
-        color: '#fff',
-        paddingVertical: 16,
-        paddingHorizontal: 16,
+        fontFamily: APP_FONT_FAMILY,
+        flex: 1,
+        fontSize: 16,
+        fontWeight: '600',
+        paddingVertical: 14,
     },
     solidSeparator: {
         height: 1,
-        backgroundColor: BORDER_COLOR,
     },
-    solidInputSingle: {
-        backgroundColor: SURFACE_DARK,
+    presetRow: {
+        flexDirection: 'row',
+        gap: 8,
+        marginBottom: 10,
+    },
+    presetChip: {
+        flex: 1,
+        minHeight: 48,
+        borderRadius: 10,
+        borderWidth: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    presetText: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 15,
+        fontWeight: '800',
+        fontVariant: ['tabular-nums'],
+    },
+    oversInputWrap: {
+        flexDirection: 'row',
+        alignItems: 'center',
         borderRadius: 12,
         borderWidth: 1,
-        borderColor: BORDER_COLOR,
-        fontSize: 18,
-        color: '#fff',
-        paddingVertical: 14,
-        paddingHorizontal: 16,
+        paddingHorizontal: 14,
+        minHeight: 50,
     },
-
+    oversUnit: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 13,
+        fontWeight: '700',
+    },
+    tabularNum: {
+        fontVariant: ['tabular-nums'],
+    },
     primaryCta: {
-        backgroundColor: CYAN_ACCENT,
-        borderRadius: 30,
-        height: 56,
+        borderRadius: 12,
+        minHeight: 54,
         width: '100%',
         alignItems: 'center',
         justifyContent: 'center',
-        marginTop: 12,
-        elevation: 4,
-        shadowColor: CYAN_ACCENT,
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.3,
-        shadowRadius: 8,
+        marginTop: 4,
     },
     primaryCtaText: {
-        color: '#FFFFFF',
-        fontSize: 16,
-        fontWeight: 'bold',
-        letterSpacing: 1,
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 15,
+        fontWeight: '800',
+        letterSpacing: 0.8,
     },
-
-    // Modal Styles
     modalOverlay: {
         flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.85)',
         justifyContent: 'center',
-        padding: 24,
+        padding: 20,
     },
     modalContent: {
-        backgroundColor: SURFACE_DARK,
-        borderRadius: 24,
-        padding: 24,
+        borderRadius: 16,
+        padding: 20,
         borderWidth: 1,
-        borderColor: BORDER_COLOR,
-        elevation: 24,
     },
     modalTitle: {
-        fontSize: 22,
-        fontWeight: 'bold',
-        marginBottom: 20,
-        textAlign: 'center',
-        color: '#fff'
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 20,
+        fontWeight: '800',
+        marginBottom: 16,
     },
     modalLabel: {
-        fontSize: 14,
-        color: '#9EABB8',
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 11,
         marginBottom: 6,
-        fontWeight: '600'
+        fontWeight: '800',
+        letterSpacing: 0.6,
     },
     modalInput: {
-        backgroundColor: '#161B22',
+        fontFamily: APP_FONT_FAMILY,
         borderWidth: 1,
-        borderColor: BORDER_COLOR,
-        borderRadius: 12,
-        padding: 14,
-        marginBottom: 16,
+        borderRadius: 10,
+        paddingHorizontal: 14,
+        minHeight: 48,
+        marginBottom: 14,
         fontSize: 16,
-        color: '#fff',
+        fontWeight: '600',
     },
     modalCancel: {
-        marginTop: 16,
+        marginTop: 10,
+        minHeight: 48,
         alignItems: 'center',
-        paddingVertical: 8,
+        justifyContent: 'center',
     },
     modalCancelText: {
-        color: '#9EABB8',
-        fontSize: 16,
-        fontWeight: '600'
-    }
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 15,
+        fontWeight: '700',
+    },
 });
