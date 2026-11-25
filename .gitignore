@@ -39,3 +39,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+#agents & Skills
+
+.agents/
+.agent/
+.impeccable/
+PRODUCT.md 
+DESIGN.md
