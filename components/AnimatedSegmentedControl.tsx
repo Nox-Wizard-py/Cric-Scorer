@@ -1,9 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Animated, Easing, LayoutChangeEvent } from 'react-native';
-
-const CYAN_ACCENT = '#15A3C7';
-const SURFACE_DARK = '#1E252B';
-const BORDER_COLOR = '#2C353D';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+    Animated,
+    Easing,
+    LayoutChangeEvent,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from 'react-native';
+import { APP_FONT_FAMILY } from '../constants/colors';
+import { useTheme } from '../constants/theme';
 
 interface Option {
     label: string;
@@ -16,18 +22,23 @@ interface AnimatedSegmentedControlProps {
     onChange: (index: number) => void;
 }
 
-export const AnimatedSegmentedControl: React.FC<AnimatedSegmentedControlProps> = ({ options, selectedIndex, onChange }) => {
+export const AnimatedSegmentedControl: React.FC<AnimatedSegmentedControlProps> = ({
+    options,
+    selectedIndex,
+    onChange,
+}) => {
+    const { theme } = useTheme();
     const [containerWidth, setContainerWidth] = useState(0);
     const gap = 10;
-    
-    const optionWidth = containerWidth > 0 ? (containerWidth - (gap * (options.length - 1))) / options.length : 0;
-    
+
+    const optionWidth =
+        containerWidth > 0 ? (containerWidth - gap * (options.length - 1)) / options.length : 0;
+
     const translateX = useRef(new Animated.Value(0)).current;
-    const scale = useRef(new Animated.Value(1)).current;
     const isInitialRender = useRef(true);
 
     useEffect(() => {
-        if (optionWidth > 0) {
+        if (optionWidth > 0 && selectedIndex >= 0) {
             const destination = selectedIndex * (optionWidth + gap);
 
             if (isInitialRender.current) {
@@ -36,89 +47,84 @@ export const AnimatedSegmentedControl: React.FC<AnimatedSegmentedControlProps> =
                 return;
             }
 
-            Animated.sequence([
-                // 1. Compress
-                Animated.timing(scale, {
-                    toValue: 0.94,
-                    duration: 70,
-                    easing: Easing.out(Easing.ease),
-                    useNativeDriver: true,
-                }),
-                // 2. Slide and expand
-                Animated.parallel([
-                    Animated.timing(translateX, {
-                        toValue: destination,
-                        duration: 160,
-                        easing: Easing.inOut(Easing.ease),
-                        useNativeDriver: true,
-                    }),
-                    Animated.timing(scale, {
-                        toValue: 1.02,
-                        duration: 160,
-                        easing: Easing.inOut(Easing.ease),
-                        useNativeDriver: true,
-                    })
-                ]),
-                // 3. Settle
-                Animated.timing(scale, {
-                    toValue: 1,
-                    duration: 80,
-                    easing: Easing.out(Easing.ease),
-                    useNativeDriver: true,
-                })
-            ]).start();
+            Animated.timing(translateX, {
+                toValue: destination,
+                duration: 180,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: true,
+            }).start();
         }
     }, [selectedIndex, optionWidth]);
 
     const handleLayout = (e: LayoutChangeEvent) => {
-        setContainerWidth(e.nativeEvent.layout.width);
-        const initWidth = (e.nativeEvent.layout.width - (gap * (options.length - 1))) / options.length;
-        translateX.setValue(selectedIndex * (initWidth + gap));
+        const w = e.nativeEvent.layout.width;
+        setContainerWidth(w);
+        if (selectedIndex >= 0) {
+            const initWidth = (w - gap * (options.length - 1)) / options.length;
+            translateX.setValue(selectedIndex * (initWidth + gap));
+        }
     };
 
     return (
         <View style={[styles.container, { gap }]} onLayout={handleLayout}>
-            {/* Layer 1: Base Buttons (Dark Surface) */}
             {options.map((option, index) => (
-                <View key={`base-${index}`} style={styles.baseButton}>
-                    {/* Render invisible content to dictate container height */}
+                <View
+                    key={`base-${index}`}
+                    style={[
+                        styles.baseButton,
+                        {
+                            backgroundColor: theme.surface,
+                            borderColor: theme.border,
+                        },
+                    ]}
+                >
                     <View style={styles.invisibleContent}>
                         {option.icon && option.icon(false)}
-                        <Text style={[styles.text, { opacity: 0 }]}>{option.label}</Text>
+                        <Text style={styles.text}>{option.label}</Text>
                     </View>
                 </View>
             ))}
 
-            {/* Layer 2: Animated Pill */}
             {containerWidth > 0 && selectedIndex >= 0 && (
                 <Animated.View
+                    pointerEvents="none"
                     style={[
                         styles.animatedPill,
                         {
                             width: optionWidth,
-                            transform: [{ translateX }, { scale }]
-                        }
+                            backgroundColor: theme.primary,
+                            borderColor: theme.primary,
+                            transform: [{ translateX }],
+                        },
                     ]}
                 />
             )}
 
-            {/* Layer 3: Interactive Foreground */}
             <View style={[StyleSheet.absoluteFill, styles.foregroundContainer, { gap }]}>
                 {options.map((option, index) => {
                     const isActive = selectedIndex === index;
                     return (
                         <TouchableOpacity
                             key={`fg-${index}`}
-                            activeOpacity={1}
+                            activeOpacity={0.85}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected: isActive }}
                             style={styles.touchableArea}
                             onPress={() => onChange(index)}
                         >
-                            <Animated.View style={styles.contentRow}>
+                            <View style={styles.contentRow}>
                                 {option.icon && option.icon(isActive)}
-                                <Text style={[styles.text, isActive && styles.textActive]}>
+                                <Text
+                                    numberOfLines={1}
+                                    style={[
+                                        styles.text,
+                                        { color: isActive ? theme.onPrimary : theme.textPrimary },
+                                        isActive && styles.textActive,
+                                    ]}
+                                >
                                     {option.label}
                                 </Text>
-                            </Animated.View>
+                            </View>
                         </TouchableOpacity>
                     );
                 })}
@@ -134,11 +140,12 @@ const styles = StyleSheet.create({
     },
     baseButton: {
         flex: 1,
-        paddingVertical: 14,
-        borderRadius: 12,
-        backgroundColor: SURFACE_DARK,
+        minHeight: 48,
+        paddingVertical: 13,
+        paddingHorizontal: 12,
+        borderRadius: 10,
         borderWidth: 1,
-        borderColor: BORDER_COLOR,
+        justifyContent: 'center',
     },
     invisibleContent: {
         flexDirection: 'row',
@@ -151,23 +158,20 @@ const styles = StyleSheet.create({
         top: 0,
         bottom: 0,
         left: 0,
-        backgroundColor: CYAN_ACCENT,
-        borderRadius: 12,
+        borderRadius: 10,
         borderWidth: 1,
-        borderColor: CYAN_ACCENT,
         zIndex: 1,
     },
     foregroundContainer: {
         flexDirection: 'row',
         zIndex: 2,
-        elevation: 2,
     },
     touchableArea: {
         flex: 1,
-        borderRadius: 12,
+        borderRadius: 10,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'transparent',
+        paddingHorizontal: 10,
     },
     contentRow: {
         flexDirection: 'row',
@@ -175,12 +179,11 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
     },
     text: {
-        fontSize: 16,
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 15,
         fontWeight: '600',
-        color: '#9EABB8',
     },
     textActive: {
-        color: '#FFFFFF',
-        fontWeight: 'bold',
-    }
+        fontWeight: '700',
+    },
 });

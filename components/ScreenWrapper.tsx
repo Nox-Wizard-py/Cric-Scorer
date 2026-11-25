@@ -1,37 +1,60 @@
 import React, { ReactNode } from 'react';
-import { StyleSheet, ViewStyle, StatusBar } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { StyleSheet, View, ViewStyle } from 'react-native';
+import { Edge, SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
+import { useTheme } from '../constants/theme';
 
 interface ScreenWrapperProps {
     children: ReactNode;
     style?: ViewStyle;
     noPadding?: boolean;
+    edges?: Edge[];
+    headerBackground?: string;
 }
 
-export const ScreenWrapper = ({ children, style, noPadding = false }: ScreenWrapperProps) => {
+export const ScreenWrapper = ({
+    children,
+    style,
+    noPadding = false,
+    edges = ['top'],
+    headerBackground,
+}: ScreenWrapperProps) => {
+    const { theme } = useTheme();
+    const topColor = headerBackground ?? theme.headerBg;
+
     return (
-        <LinearGradient
-            // Deep rich gradient: Dark Blue/Grey -> Teal/Grey
-            colors={['#0f2027', '#203a43', '#2c5364']}
-            style={styles.container}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-        >
-            <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
-            <SafeAreaView style={[styles.safeArea, style, noPadding && { padding: 0 }]}>
-                {children}
+        <View style={[styles.root, { backgroundColor: theme.background }]}>
+            <StatusBar style="light" />
+            <SafeAreaView
+                edges={edges}
+                style={[styles.safeArea, { backgroundColor: topColor }]}
+            >
+                <View
+                    style={[
+                        styles.body,
+                        { backgroundColor: theme.background },
+                        !noPadding && styles.padded,
+                        style,
+                    ]}
+                >
+                    {children}
+                </View>
             </SafeAreaView>
-        </LinearGradient>
+        </View>
     );
 };
 
 const styles = StyleSheet.create({
-    container: {
+    root: {
         flex: 1,
     },
     safeArea: {
         flex: 1,
-        padding: 16, // Default padding
+    },
+    body: {
+        flex: 1,
+    },
+    padded: {
+        padding: 16,
     },
 });

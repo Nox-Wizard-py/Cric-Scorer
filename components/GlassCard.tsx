@@ -25,7 +25,7 @@ const styles = StyleSheet.create({
         padding: 16,
     },
     borderLayer: {
-        ...StyleSheet.absoluteFillObject,
+        ...StyleSheet.absoluteFill,
         borderWidth: 1,
         borderColor: 'rgba(255, 255, 255, 0.2)',
         borderRadius: 24,
