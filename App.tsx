@@ -1,10 +1,12 @@
 import React, { useEffect } from 'react';
+import { Text } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { StatusBar } from 'expo-status-bar';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { GlassProvider } from '@rbayuokt/expo-adaptive-glass';
+import { GlassNavigationTabBar, GlassScreenBackdrop } from '@rbayuokt/expo-adaptive-glass/navigation';
 
 import HomeScreen from './screens/HomeScreen';
 import TournamentsScreen from './screens/TournamentsScreen';
@@ -12,19 +14,16 @@ import TeamsScreen from './screens/TeamsScreen';
 import HistoryScreen from './screens/HistoryScreen';
 import ScoringScreen from './screens/ScoringScreen';
 import MatchResultScreen from './screens/MatchResultScreen';
-import { COLORS } from './constants/colors';
+import { APP_FONT_FAMILY } from './constants/colors';
+import { ThemeProvider, useTheme } from './constants/theme';
 import { initDatabase } from './database/db';
-
-import { StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { GlassProvider } from '@rbayuokt/expo-adaptive-glass';
-import { GlassNavigationTabBar, GlassScreenBackdrop } from '@rbayuokt/expo-adaptive-glass/navigation';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
 function TabNavigator() {
   const insets = useSafeAreaInsets();
+  const { theme } = useTheme();
 
   return (
     <Tab.Navigator
@@ -32,42 +31,53 @@ function TabNavigator() {
       tabBar={(props) => (
         <GlassNavigationTabBar
           {...props}
-          tint="dark"
-          intensity={70}
+          tint="light"
+          intensity={0.85}
           lens={true}
+          selection="pill"
+          selectionColor="rgba(0, 180, 138, 0.16)"
           style={{
-            position: 'absolute',
-            bottom: Math.max(insets.bottom + 10, 30), // dynamic safe area with minimum spacing
-            left: '15%',
-            right: '15%', // 30% total margin ensures exactly 70% width for a tighter floating dock
-            borderRadius: 40,
-            height: 75, // Increases vertical padding/spaciousness
-            // overflow: 'hidden' intentionally removed to prevent the native lens from clipping during press/drag expansions
+            bottom: Math.max(insets.bottom, 8) + 8,
+            left: 36,
+            right: 36,
+            borderRadius: 999,
+            boxShadow: '0px 8px 22px rgba(16, 32, 48, 0.18)',
           }}
         />
       )}
       screenOptions={({ route }) => ({
-        headerShown: false, // Hide default headers for cleaner look, we'll use local headers or none
-        tabBarShowLabel: false, // Hide labels
-        tabBarActiveTintColor: '#0F8FAC', // White
-        tabBarInactiveTintColor: '#FFFFFF',
-
-        tabBarIcon: ({ color, size, focused }) => {
+        headerShown: false,
+        tabBarShowLabel: true,
+        tabBarActiveTintColor: theme.tabActive,
+        tabBarInactiveTintColor: theme.tabInactive,
+        tabBarLabel: ({ color, children }) => (
+          <Text
+            numberOfLines={1}
+            style={{
+              fontFamily: APP_FONT_FAMILY,
+              fontSize: 11,
+              fontWeight: '700',
+              color,
+              marginTop: 1,
+            }}
+          >
+            {children}
+          </Text>
+        ),
+        tabBarIcon: ({ color, focused }) => {
           let iconName: keyof typeof MaterialCommunityIcons.glyphMap = 'circle';
 
           if (route.name === 'Home') iconName = 'cricket';
-          else if (route.name === 'Tournaments') iconName = 'trophy';
-          else if (route.name === 'Teams') iconName = 'account-group';
+          else if (route.name === 'Tournaments') iconName = 'trophy-outline';
+          else if (route.name === 'Teams') iconName = 'account-group-outline';
           else if (route.name === 'History') iconName = 'history';
 
-          return (
-            <View style={{
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}>
-              <MaterialCommunityIcons name={iconName} size={26} color={color} />
-            </View>
-          );
+          if (focused) {
+            if (route.name === 'Tournaments') iconName = 'trophy';
+            else if (route.name === 'Teams') iconName = 'account-group';
+          }
+
+          return <MaterialCommunityIcons name={iconName} size={22} color={color} />;
         },
       })}
     >
@@ -79,6 +89,18 @@ function TabNavigator() {
   );
 }
 
+function RootNavigator() {
+  return (
+    <NavigationContainer>
+      <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Tabs" component={TabNavigator} />
+        <Stack.Screen name="Scoring" component={ScoringScreen} />
+        <Stack.Screen name="MatchResult" component={MatchResultScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+}
+
 export default function App() {
   useEffect(() => {
     initDatabase();
@@ -86,29 +108,10 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <GlassProvider>
-        <NavigationContainer>
-        {/* @ts-ignore: expo-status-bar types in this version don't map backgroundColor perfectly */}
-        <StatusBar style="light" backgroundColor={COLORS.primary} />
-        <Stack.Navigator screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="Tabs" component={TabNavigator} />
-          <Stack.Screen
-            name="Scoring"
-            component={ScoringScreen}
-            options={{
-              headerShown: true,
-              headerStyle: { backgroundColor: COLORS.primary },
-              headerTintColor: COLORS.surface,
-              title: 'Scoring',
-            }}
-          />
-          <Stack.Screen
-            name="MatchResult"
-            component={MatchResultScreen}
-            options={{ headerShown: false }}
-          />
-        </Stack.Navigator>
-      </NavigationContainer>
+      <GlassProvider quality="auto" clarity={0.85}>
+        <ThemeProvider>
+          <RootNavigator />
+        </ThemeProvider>
       </GlassProvider>
     </SafeAreaProvider>
   );
