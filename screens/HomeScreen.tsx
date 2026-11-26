@@ -14,6 +14,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { db } from '../database/db';
+import { getOrCreatePlayer, normalizePlayerName } from '../database/playerIdentity';
 import { ScreenWrapper } from '../components/ScreenWrapper';
 import { AppHeader } from '../components/AppHeader';
 import { AnimatedSegmentedControl } from '../components/AnimatedSegmentedControl';
@@ -49,6 +50,10 @@ export default function HomeScreen() {
     const confirmStartMatch = async () => {
         if (!strikerName.trim() || !nonStrikerName.trim() || !bowlerName.trim()) {
             Alert.alert('Missing Players', 'Please enter all three opening player names.');
+            return;
+        }
+        if (normalizePlayerName(strikerName) === normalizePlayerName(nonStrikerName)) {
+            Alert.alert('Duplicate Batter', 'Striker and Non-Striker must be different players.');
             return;
         }
 
@@ -88,9 +93,9 @@ export default function HomeScreen() {
                 bowlTeamId = tossWinner === 'Host' ? homeTeamId : awayTeamId;
             }
 
-            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', strikerName.trim(), batTeamId);
-            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', nonStrikerName.trim(), batTeamId);
-            db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', bowlerName.trim(), bowlTeamId);
+            getOrCreatePlayer(batTeamId, strikerName);
+            getOrCreatePlayer(batTeamId, nonStrikerName);
+            getOrCreatePlayer(bowlTeamId, bowlerName);
 
             navigation.navigate('Scoring', { matchId });
         } catch (error) {
