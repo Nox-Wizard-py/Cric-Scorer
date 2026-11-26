@@ -25,14 +25,18 @@ export interface Match {
     toss_winner_id: number;
     opt_to: 'Bat' | 'Bowl';
     overs: number;
-    is_completed: boolean; // stored as 0 or 1 in SQLite, converted to boolean in app
+    is_completed: number | boolean;
+    inning1_completed?: number;
+    inning2_striker_id?: number | null;
+    inning2_non_striker_id?: number | null;
+    inning2_bowler_id?: number | null;
     created_at: string;
 }
 
 export interface Delivery {
     id: number;
     match_id: number;
-    inning: 1 | 2;
+    inning: 1 | 2 | number;
     over_number: number;
     ball_number: number;
     batsman_id: number;
@@ -41,7 +45,9 @@ export interface Delivery {
     runs: number;
     extras_type: 'WD' | 'NB' | 'LB' | 'B' | null;
     extras_runs: number;
-    is_wicket: boolean;
+    is_wicket: number | boolean;
     wicket_type: string | null;
     player_out_id: number | null;
+    fielder_id?: number | null;
+    next_batsman_id?: number | null;
 }
