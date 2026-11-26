@@ -2,6 +2,13 @@ import * as SQLite from 'expo-sqlite';
 
 export const db = SQLite.openDatabaseSync('cricket_scorer.db');
 
+const ensureColumn = (table: string, column: string, definition: string) => {
+  const cols = db.getAllSync(`PRAGMA table_info(${table})`) as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.execSync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+};
+
 export const initDatabase = () => {
   try {
     db.execSync(`
@@ -36,6 +43,10 @@ export const initDatabase = () => {
         opt_to TEXT CHECK(opt_to IN ('Bat', 'Bowl')) NOT NULL,
         overs INTEGER NOT NULL,
         is_completed INTEGER DEFAULT 0,
+        inning1_completed INTEGER DEFAULT 0,
+        inning2_striker_id INTEGER,
+        inning2_non_striker_id INTEGER,
+        inning2_bowler_id INTEGER,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (tournament_id) REFERENCES Tournaments (id),
         FOREIGN KEY (home_team_id) REFERENCES Teams (id),
@@ -58,13 +69,26 @@ export const initDatabase = () => {
         is_wicket INTEGER DEFAULT 0,
         wicket_type TEXT,
         player_out_id INTEGER,
+        fielder_id INTEGER,
+        next_batsman_id INTEGER,
         FOREIGN KEY (match_id) REFERENCES Matches (id),
         FOREIGN KEY (batsman_id) REFERENCES Players (id),
         FOREIGN KEY (non_striker_id) REFERENCES Players (id),
         FOREIGN KEY (bowler_id) REFERENCES Players (id),
-        FOREIGN KEY (player_out_id) REFERENCES Players (id)
+        FOREIGN KEY (player_out_id) REFERENCES Players (id),
+        FOREIGN KEY (fielder_id) REFERENCES Players (id),
+        FOREIGN KEY (next_batsman_id) REFERENCES Players (id)
       );
     `);
+
+    // Migrate pre-existing local databases safely
+    ensureColumn('Matches', 'inning1_completed', 'INTEGER DEFAULT 0');
+    ensureColumn('Matches', 'inning2_striker_id', 'INTEGER');
+    ensureColumn('Matches', 'inning2_non_striker_id', 'INTEGER');
+    ensureColumn('Matches', 'inning2_bowler_id', 'INTEGER');
+    ensureColumn('Deliveries', 'fielder_id', 'INTEGER');
+    ensureColumn('Deliveries', 'next_batsman_id', 'INTEGER');
+
     console.log('Database initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);
