@@ -13,41 +13,22 @@ import {
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { db } from '../database/db';
+import { getOrCreatePlayer, normalizePlayerName } from '../database/playerIdentity';
+import { Delivery, Match, Player, Team } from '../database/types';
+import {
+    DISMISSAL_TYPES,
+    MAX_PLAYERS_PER_TEAM,
+    MAX_WICKETS,
+    MatchDerivedState,
+    OverBallBadge,
+    computeMatchResult,
+    deriveMatchState,
+    dismissalRequiresFielder,
+} from '../engine/scoringEngine';
 import { ScreenWrapper } from '../components/ScreenWrapper';
 import { AppHeader } from '../components/AppHeader';
 import { APP_FONT_FAMILY } from '../constants/colors';
 import { useTheme } from '../constants/theme';
-import { Match, Player, Team } from '../database/types';
-
-interface ScoreState {
-    totalRuns: number;
-    wickets: number;
-    overs: number;
-    balls: number;
-    currentBatsmanId: number;
-    nonStrikerId: number;
-    currentBowlerId: number;
-    recentBalls: string[];
-    inning: number;
-    target: number | null;
-}
-
-interface DeliveryRow {
-    id: number;
-    match_id: number;
-    inning: number;
-    over_number: number;
-    ball_number: number;
-    batsman_id: number;
-    non_striker_id: number;
-    bowler_id: number;
-    runs: number;
-    extras_type: 'WD' | 'NB' | 'LB' | 'B' | null;
-    extras_runs: number;
-    is_wicket: number;
-    wicket_type: string | null;
-    player_out_id: number | null;
-}
 
 const EXTRA_KEYS: Array<{ key: 'wide' | 'noBall' | 'byes' | 'legByes' | 'wicket'; label: string }> = [
     { key: 'wide', label: 'WD' },
@@ -57,14 +38,6 @@ const EXTRA_KEYS: Array<{ key: 'wide' | 'noBall' | 'byes' | 'legByes' | 'wicket'
     { key: 'wicket', label: 'OUT' },
 ];
 
-const formatBallLabel = (d: Pick<DeliveryRow, 'runs' | 'extras_type' | 'extras_runs' | 'is_wicket'>) => {
-    const total = d.runs + (d.extras_runs || 0);
-    if (d.is_wicket === 1) return 'W';
-    if (d.extras_type === 'WD') return `${total}wd`;
-    if (d.extras_type === 'NB') return `${total}nb`;
-    return `${total}`;
-};
-
 export default function ScoringScreen() {
     const route = useRoute<any>();
     const navigation = useNavigation<any>();
@@ -72,23 +45,10 @@ export default function ScoringScreen() {
     const { theme } = useTheme();
     const { matchId } = route.params || {};
 
-    const [matchData, setMatchData] = useState<Match | null>(null);
-    const [battingTeam, setBattingTeam] = useState<Team | null>(null);
-    const [bowlingTeam, setBowlingTeam] = useState<Team | null>(null);
+    const [matchState, setMatchState] = useState<MatchDerivedState | null>(null);
     const [allPlayers, setAllPlayers] = useState<Player[]>([]);
-
-    const [score, setScore] = useState<ScoreState>({
-        totalRuns: 0,
-        wickets: 0,
-        overs: 0,
-        balls: 0,
-        currentBatsmanId: 0,
-        nonStrikerId: 0,
-        currentBowlerId: 0,
-        recentBalls: [],
-        inning: 1,
-        target: null,
-    });
+    const [manualStrikeSwapped, setManualStrikeSwapped] = useState(false);
+    const [pendingBowlerId, setPendingBowlerId] = useState<number | null>(null);
 
     const [extras, setExtras] = useState({
         wide: false,
@@ -97,18 +57,10 @@ export default function ScoringScreen() {
         legByes: false,
         wicket: false,
     });
-    const [extraStats, setExtraStats] = useState({
-        wide: 0,
-        noBall: 0,
-        byes: 0,
-        legByes: 0,
-        total: 0,
-    });
-
-    const [partnership, setPartnership] = useState({ runs: 0, balls: 0 });
 
     const [showBowlerModal, setShowBowlerModal] = useState(false);
     const [newBowlerName, setNewBowlerName] = useState('');
+
     const [showWicketModal, setShowWicketModal] = useState(false);
     const [wicketDetails, setWicketDetails] = useState({
         type: 'Caught',
@@ -118,25 +70,14 @@ export default function ScoringScreen() {
     });
 
     const [showInningBreakModal, setShowInningBreakModal] = useState(false);
-    const [pendingTarget, setPendingTarget] = useState<number>(0);
     const [showInningStartModal, setShowInningStartModal] = useState(false);
     const [newInningPlayers, setNewInningPlayers] = useState({ striker: '', nonStriker: '', bowler: '' });
+    const [inningStartError, setInningStartError] = useState<string | null>(null);
 
+    const [showCompleteInningsModal, setShowCompleteInningsModal] = useState(false);
     const [infoSheet, setInfoSheet] = useState<'partnership' | 'extras' | null>(null);
     const [snackbar, setSnackbar] = useState<string | null>(null);
     const snackbarTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    const [batsmanStats, setBatsmanStats] = useState({
-        striker: { name: 'Striker', runs: 0, balls: 0, fours: 0, sixes: 0 },
-        nonStriker: { name: 'Non-Striker', runs: 0, balls: 0, fours: 0, sixes: 0 },
-    });
-    const [bowlerStats, setBowlerStats] = useState({
-        name: 'Bowler',
-        overs: 0,
-        maidens: 0,
-        runs: 0,
-        wickets: 0,
-    });
 
     const showNotice = (message: string) => {
         setSnackbar(message);
@@ -150,700 +91,438 @@ export default function ScoringScreen() {
         };
     }, []);
 
+    const loadMatchFromDb = (): { derived: MatchDerivedState; players: Player[] } | null => {
+        if (!matchId) return null;
+        const match = db.getFirstSync('SELECT * FROM Matches WHERE id = ?', matchId) as Match | null;
+        if (!match) return null;
+
+        const homeTeam = db.getFirstSync('SELECT * FROM Teams WHERE id = ?', match.home_team_id) as Team;
+        const awayTeam = db.getFirstSync('SELECT * FROM Teams WHERE id = ?', match.away_team_id) as Team;
+        const players = db.getAllSync(
+            'SELECT * FROM Players WHERE team_id IN (?, ?) ORDER BY id ASC',
+            homeTeam.id,
+            awayTeam.id
+        ) as Player[];
+        const deliveries = db.getAllSync(
+            'SELECT * FROM Deliveries WHERE match_id = ? ORDER BY inning ASC, id ASC',
+            matchId
+        ) as Delivery[];
+
+        const derived = deriveMatchState({ match, homeTeam, awayTeam, players, deliveries });
+        setMatchState(derived);
+        setAllPlayers(players);
+        return { derived, players };
+    };
+
+    const syncTransitions = (derived: MatchDerivedState, fromLoad: boolean = false) => {
+        if (derived.isMatchComplete && derived.result) {
+            try {
+                db.runSync('UPDATE Matches SET is_completed = 1 WHERE id = ?', matchId);
+            } catch (e) {}
+            navigation.navigate('MatchResult', {
+                winner: derived.result.winner,
+                margin: derived.result.margin,
+            });
+            return;
+        }
+
+        if (derived.needsSecondInningsSetup) {
+            try {
+                db.runSync('UPDATE Matches SET inning1_completed = 1 WHERE id = ?', matchId);
+            } catch (e) {}
+            if (fromLoad) {
+                setShowInningStartModal(true);
+            } else {
+                setShowInningBreakModal(true);
+            }
+            return;
+        }
+
+        if (derived.activeState.needsBowlerChange && pendingBowlerId === null) {
+            setNewBowlerName('');
+            setShowBowlerModal(true);
+        }
+    };
+
     useEffect(() => {
-        if (matchId) {
-            loadMatchDetails();
+        const loaded = loadMatchFromDb();
+        if (loaded) {
+            syncTransitions(loaded.derived, true);
         }
     }, [matchId]);
 
-    const computePlayersStatsFromDb = (
-        p1Id: number,
-        p2Id: number,
-        bowlId: number,
-        inningNum: number,
-        playersPool: Player[]
-    ) => {
-        const getBatStats = (pid: number) => {
-            const res = db.getFirstSync(
-                `SELECT count(*) as balls, sum(runs) as runs, 
-                sum(case when runs=4 then 1 else 0 end) as fours,
-                sum(case when runs=6 then 1 else 0 end) as sixes
-                FROM Deliveries WHERE batsman_id = ? AND match_id = ? AND inning = ? AND (extras_type IS NULL OR extras_type='NB')`,
-                pid,
-                matchId,
-                inningNum
-            ) as any;
-            const name = playersPool.find((p) => p.id === pid)?.name || 'Player';
-            return {
-                name,
-                runs: res?.runs || 0,
-                balls: res?.balls || 0,
-                fours: res?.fours || 0,
-                sixes: res?.sixes || 0,
-            };
-        };
+    const activeState = matchState?.activeState ?? null;
+    const displayStrikerId = activeState
+        ? manualStrikeSwapped
+            ? activeState.nonStrikerId
+            : activeState.strikerId
+        : 0;
+    const displayNonStrikerId = activeState
+        ? manualStrikeSwapped
+            ? activeState.strikerId
+            : activeState.nonStrikerId
+        : 0;
+    const displayBowlerId = activeState
+        ? pendingBowlerId ?? activeState.currentBowlerId
+        : 0;
 
-        const getBowlStats = (pid: number) => {
-            const res = db.getFirstSync(
-                `SELECT sum(is_wicket) as wickets FROM Deliveries WHERE bowler_id = ? AND match_id = ? AND inning = ?`,
-                pid,
-                matchId,
-                inningNum
-            ) as any;
+    const strikerStat = activeState?.batterStats[displayStrikerId];
+    const nonStrikerStat = activeState?.batterStats[displayNonStrikerId];
+    const bowlerStat = activeState?.bowlerStats[displayBowlerId];
+    const displayBowlerName =
+        bowlerStat?.name || allPlayers.find((p) => p.id === displayBowlerId)?.name || 'Bowler';
 
-            const runsRes = db.getFirstSync(
-                `SELECT sum(runs + extras_runs) as total 
-                FROM Deliveries WHERE bowler_id = ? AND match_id = ? AND inning = ? 
-                AND (extras_type IS NULL OR extras_type NOT IN ('B', 'LB'))`,
-                pid,
-                matchId,
-                inningNum
-            ) as any;
-
-            const validBalls = db.getFirstSync(
-                `SELECT count(*) as cnt FROM Deliveries 
-                 WHERE bowler_id = ? AND match_id = ? AND inning = ? 
-                 AND (extras_type IS NULL OR (extras_type != 'WD' AND extras_type != 'NB'))`,
-                pid,
-                matchId,
-                inningNum
-            ) as any;
-
-            const name = playersPool.find((p) => p.id === pid)?.name || 'Bowler';
-            const vBalls = validBalls?.cnt || 0;
-            return {
-                name,
-                overs: Math.floor(vBalls / 6),
-                maidens: 0,
-                runs: runsRes?.total || 0,
-                wickets: res?.wickets || 0,
-            };
-        };
-
-        setBatsmanStats({
-            striker: getBatStats(p1Id),
-            nonStriker: getBatStats(p2Id),
-        });
-        setBowlerStats(getBowlStats(bowlId));
+    // --- Validation Helpers ---
+    const isTeamAtCap = (teamId: number, rawName: string): boolean => {
+        const norm = normalizePlayerName(rawName);
+        if (!norm) return false;
+        const teamRoster = allPlayers.filter((p) => p.team_id === teamId);
+        const alreadyExists = teamRoster.some((p) => normalizePlayerName(p.name) === norm);
+        return !alreadyExists && teamRoster.length >= MAX_PLAYERS_PER_TEAM;
     };
 
-    const loadMatchDetails = () => {
-        try {
-            const result = db.getFirstSync('SELECT * FROM Matches WHERE id = ?', matchId) as Match | null;
-            if (!result) return;
-            setMatchData(result);
+    const getWicketBatsmanError = (): string | null => {
+        if (!activeState) return null;
+        if (activeState.wickets >= MAX_WICKETS - 1) return null; // 10th wicket -> All Out, no new batter
+        const raw = wicketDetails.newBatsmanName.trim();
+        if (!raw) return null;
 
-            const homeTeam = db.getFirstSync('SELECT * FROM Teams WHERE id = ?', result.home_team_id) as Team;
-            const awayTeam = db.getFirstSync('SELECT * FROM Teams WHERE id = ?', result.away_team_id) as Team;
-
-            let firstBatTeam: Team, firstBowlTeam: Team;
-            if (result.opt_to === 'Bat') {
-                firstBatTeam = result.toss_winner_id === homeTeam.id ? homeTeam : awayTeam;
-                firstBowlTeam = result.toss_winner_id === homeTeam.id ? awayTeam : homeTeam;
-            } else {
-                firstBatTeam = result.toss_winner_id === homeTeam.id ? awayTeam : homeTeam;
-                firstBowlTeam = result.toss_winner_id === homeTeam.id ? homeTeam : awayTeam;
-            }
-
-            const fetchPlayers = (teamId: number) =>
-                db.getAllSync('SELECT * FROM Players WHERE team_id = ?', teamId) as Player[];
-            const firstBatPlayers = fetchPlayers(firstBatTeam.id);
-            const firstBowlPlayers = fetchPlayers(firstBowlTeam.id);
-            const combinedPlayers = [...firstBatPlayers, ...firstBowlPlayers];
-            setAllPlayers(combinedPlayers);
-
-            const deliveries = db.getAllSync(
-                'SELECT * FROM Deliveries WHERE match_id = ? ORDER BY id ASC',
-                matchId
-            ) as DeliveryRow[];
-
-            const inn1Deliveries = deliveries.filter((d) => d.inning === 1);
-            const inn2Deliveries = deliveries.filter((d) => d.inning === 2);
-
-            const inn1ValidBalls = inn1Deliveries.filter(
-                (d) => d.extras_type !== 'WD' && d.extras_type !== 'NB'
-            ).length;
-            const inn1OversCompleted = Math.floor(inn1ValidBalls / 6);
-            const inn1Runs = inn1Deliveries.reduce((acc, d) => acc + d.runs + (d.extras_runs || 0), 0);
-
-            const activeInning =
-                inn2Deliveries.length > 0 || inn1OversCompleted >= (result.overs || 16) ? 2 : 1;
-            const activeDeliveries = activeInning === 2 ? inn2Deliveries : inn1Deliveries;
-            const targetScore = activeInning === 2 ? inn1Runs + 1 : null;
-
-            const activeBatTeam = activeInning === 2 ? firstBowlTeam : firstBatTeam;
-            const activeBowlTeam = activeInning === 2 ? firstBatTeam : firstBowlTeam;
-            setBattingTeam(activeBatTeam);
-            setBowlingTeam(activeBowlTeam);
-
-            if (activeDeliveries.length === 0) {
-                const batRoster = fetchPlayers(activeBatTeam.id);
-                const bowlRoster = fetchPlayers(activeBowlTeam.id);
-
-                if (activeInning === 2 && targetScore !== null) {
-                    setScore({
-                        totalRuns: 0,
-                        wickets: 0,
-                        overs: 0,
-                        balls: 0,
-                        currentBatsmanId: 0,
-                        nonStrikerId: 0,
-                        currentBowlerId: 0,
-                        recentBalls: [],
-                        inning: 2,
-                        target: targetScore,
-                    });
-                    setPendingTarget(targetScore);
-                    setShowInningStartModal(true);
-                    return;
-                }
-
-                if (batRoster.length >= 2 && bowlRoster.length >= 1) {
-                    const striker = batRoster[0];
-                    const nonStriker = batRoster[1];
-                    const bowler = bowlRoster[0];
-                    setScore({
-                        totalRuns: 0,
-                        wickets: 0,
-                        overs: 0,
-                        balls: 0,
-                        currentBatsmanId: striker.id,
-                        nonStrikerId: nonStriker.id,
-                        currentBowlerId: bowler.id,
-                        recentBalls: [],
-                        inning: 1,
-                        target: null,
-                    });
-                    setBatsmanStats({
-                        striker: { name: striker.name, runs: 0, balls: 0, fours: 0, sixes: 0 },
-                        nonStriker: { name: nonStriker.name, runs: 0, balls: 0, fours: 0, sixes: 0 },
-                    });
-                    setBowlerStats({ name: bowler.name, overs: 0, maidens: 0, runs: 0, wickets: 0 });
-                    setWicketDetails((prev) => ({ ...prev, whoOut: striker.id }));
-                }
-                return;
-            }
-
-            // Reconstruct active inning totals, extras, recent over, and crease players from SQLite
-            let totalRuns = 0;
-            let wickets = 0;
-            let validCount = 0;
-            const aggExtras = { wide: 0, noBall: 0, byes: 0, legByes: 0, total: 0 };
-
-            activeDeliveries.forEach((d) => {
-                totalRuns += d.runs + (d.extras_runs || 0);
-                if (d.is_wicket === 1) wickets += 1;
-                if (d.extras_type !== 'WD' && d.extras_type !== 'NB') validCount += 1;
-                if (d.extras_type) {
-                    const er = d.extras_runs || 0;
-                    if (d.extras_type === 'WD') aggExtras.wide += er;
-                    else if (d.extras_type === 'NB') aggExtras.noBall += er;
-                    else if (d.extras_type === 'B') aggExtras.byes += er;
-                    else if (d.extras_type === 'LB') aggExtras.legByes += er;
-                    aggExtras.total += er;
-                }
-            });
-
-            const overs = Math.floor(validCount / 6);
-            const balls = validCount % 6;
-            const currentOverDeliveries = activeDeliveries.filter((d) => d.over_number === overs);
-            const recentBalls = currentOverDeliveries.map(formatBallLabel);
-
-            const lastD = activeDeliveries[activeDeliveries.length - 1];
-            let strikerId = lastD.batsman_id;
-            let nonStrikerId = lastD.non_striker_id;
-            const bowlerId = lastD.bowler_id;
-
-            // Replay strike swaps from the last delivery
-            if (lastD.is_wicket === 1) {
-                const knownIds = new Set<number>();
-                activeDeliveries.forEach((d) => {
-                    knownIds.add(d.batsman_id);
-                    knownIds.add(d.non_striker_id);
-                });
-                const batRoster = fetchPlayers(activeBatTeam.id);
-                const latestPlayer = batRoster.find((p) => !knownIds.has(p.id) && p.id > lastD.batsman_id);
-                if (latestPlayer) {
-                    if (lastD.player_out_id === strikerId) strikerId = latestPlayer.id;
-                    else nonStrikerId = latestPlayer.id;
-                }
-            } else if (lastD.runs % 2 !== 0) {
-                const tmp = strikerId;
-                strikerId = nonStrikerId;
-                nonStrikerId = tmp;
-            }
-            if (balls === 0 && lastD.extras_type !== 'WD' && lastD.extras_type !== 'NB') {
-                const tmp = strikerId;
-                strikerId = nonStrikerId;
-                nonStrikerId = tmp;
-            }
-
-            setScore({
-                totalRuns,
-                wickets,
-                overs,
-                balls,
-                currentBatsmanId: strikerId,
-                nonStrikerId,
-                currentBowlerId: bowlerId,
-                recentBalls,
-                inning: activeInning,
-                target: targetScore,
-            });
-            setExtraStats(aggExtras);
-            setWicketDetails((prev) => ({ ...prev, whoOut: strikerId }));
-            computePlayersStatsFromDb(strikerId, nonStrikerId, bowlerId, activeInning, combinedPlayers);
-            recalcPartnershipForInning(activeInning);
-        } catch (e) {
-            console.log('Error loading match', e);
+        const norm = normalizePlayerName(raw);
+        const battedNames = new Set(
+            activeState.battedPlayerIds.map((id) =>
+                normalizePlayerName(allPlayers.find((p) => p.id === id)?.name || '')
+            )
+        );
+        if (battedNames.has(norm)) {
+            return 'This player has already batted in this innings';
         }
-    };
-
-    const recalcPartnershipForInning = (inningNum: number) => {
-        const lastWicket = db.getFirstSync(
-            'SELECT id FROM Deliveries WHERE match_id=? AND inning=? AND is_wicket=1 ORDER BY id DESC LIMIT 1',
-            matchId,
-            inningNum
-        ) as any;
-
-        const lastWicketId = lastWicket ? lastWicket.id : 0;
-
-        const res = db.getFirstSync(
-            `SELECT sum(runs + extras_runs) as runs, 
-            count(case when (extras_type IS NULL OR (extras_type != 'WD' AND extras_type != 'NB')) then 1 else null end) as balls
-            FROM Deliveries 
-            WHERE match_id=? AND inning=? AND id > ?`,
-            matchId,
-            inningNum,
-            lastWicketId
-        ) as any;
-
-        setPartnership({ runs: res?.runs || 0, balls: res?.balls || 0 });
-    };
-
-    const handleMatchEnd = (winner: string, margin: string) => {
-        try {
-            if (matchId) {
-                db.runSync('UPDATE Matches SET is_completed = 1 WHERE id = ?', matchId);
-            }
-        } catch (e) {
-            console.log('Error marking match completed', e);
+        if (isTeamAtCap(activeState.battingTeam.id, raw)) {
+            return 'Maximum 11 players allowed per team';
         }
-        navigation.navigate('MatchResult', { winner, margin });
+        return null;
     };
 
+    const getFielderError = (): string | null => {
+        if (!activeState || !dismissalRequiresFielder(wicketDetails.type)) return null;
+        const raw = wicketDetails.fielderName.trim();
+        if (!raw) return null;
+        if (isTeamAtCap(activeState.bowlingTeam.id, raw)) {
+            return 'Maximum 11 players allowed per team';
+        }
+        return null;
+    };
+
+    const getBowlerInputError = (): string | null => {
+        if (!activeState) return null;
+        const raw = newBowlerName.trim();
+        if (!raw) return null;
+        const norm = normalizePlayerName(raw);
+        if (activeState.previousOverBowlerId) {
+            const prevName = allPlayers.find((p) => p.id === activeState.previousOverBowlerId)?.name || '';
+            if (normalizePlayerName(prevName) === norm) {
+                return 'A bowler cannot bowl consecutive overs';
+            }
+        }
+        if (isTeamAtCap(activeState.bowlingTeam.id, raw)) {
+            return 'Maximum 11 players allowed per team';
+        }
+        return null;
+    };
+
+    const wicketBatsmanError = getWicketBatsmanError();
+    const fielderError = getFielderError();
+    const bowlerInputError = getBowlerInputError();
+    const isTenthWicket = (activeState?.wickets ?? 0) >= MAX_WICKETS - 1;
+    const needsFielderInput = dismissalRequiresFielder(wicketDetails.type);
+
+    // --- Delivery Recording ---
     const handleScoreClick = (runs: number) => {
-        if (score.inning === 2 && score.target) {
-            if (score.totalRuns + runs >= score.target) {
-                processDelivery(runs, undefined, true);
-                return;
-            }
+        if (!matchState || !activeState) return;
+        if (activeState.isInningsComplete) {
+            syncTransitions(matchState);
+            return;
+        }
+        if (activeState.needsBowlerChange && pendingBowlerId === null) {
+            setShowBowlerModal(true);
+            return;
         }
 
         if (extras.wicket) {
+            setWicketDetails({
+                type: extras.noBall ? 'Run Out' : 'Caught',
+                whoOut: displayStrikerId,
+                newBatsmanName: '',
+                fielderName: '',
+            });
             setShowWicketModal(true);
             return;
         }
-        processDelivery(runs);
+
+        recordDelivery(runs);
     };
 
-    const processDelivery = (runs: number, wicketInfo?: any, isWinningRun: boolean = false) => {
+    const recordDelivery = (
+        runs: number,
+        wicketPayload?: {
+            type: string;
+            whoOut: number;
+            fielderId: number | null;
+            nextBatsmanId: number | null;
+        }
+    ) => {
+        if (!matchState || !activeState) return;
+
         let runsScored = runs;
-        let isExtra = false;
-        let extraType: string | null = null;
+        let extraType: 'WD' | 'NB' | 'B' | 'LB' | null = null;
         let extraRuns = 0;
-        const isWicket = !!wicketInfo;
-        let validBall = true;
 
         if (extras.wide) {
-            isExtra = true;
             extraType = 'WD';
             extraRuns = 1 + runs;
-            validBall = false;
             runsScored = 0;
         } else if (extras.noBall) {
-            isExtra = true;
             extraType = 'NB';
-            extraRuns = 1;
-            runsScored = runs;
-            validBall = false;
+            if (extras.byes || extras.legByes) {
+                extraRuns = 1 + runs;
+                runsScored = 0;
+            } else {
+                extraRuns = 1;
+                runsScored = runs;
+            }
         } else if (extras.byes) {
-            isExtra = true;
             extraType = 'B';
             extraRuns = runs;
             runsScored = 0;
         } else if (extras.legByes) {
-            isExtra = true;
             extraType = 'LB';
             extraRuns = runs;
             runsScored = 0;
         }
 
-        const totalDeliveryRuns = runsScored + extraRuns;
-
         try {
             db.runSync(
                 `INSERT INTO Deliveries (
-          match_id, inning, over_number, ball_number, batsman_id, non_striker_id, bowler_id, 
-          runs, extras_type, extras_runs, is_wicket, wicket_type, player_out_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          match_id, inning, over_number, ball_number, batsman_id, non_striker_id, bowler_id,
+          runs, extras_type, extras_runs, is_wicket, wicket_type, player_out_id, fielder_id, next_batsman_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 matchId,
-                score.inning,
-                score.overs,
-                score.balls + 1,
-                score.currentBatsmanId,
-                score.nonStrikerId,
-                score.currentBowlerId,
+                activeState.inning,
+                activeState.oversCompleted,
+                activeState.ballsInOver + 1,
+                displayStrikerId,
+                displayNonStrikerId,
+                displayBowlerId,
                 runsScored,
                 extraType,
                 extraRuns,
-                isWicket ? 1 : 0,
-                wicketInfo ? wicketInfo.type : null,
-                wicketInfo ? wicketInfo.whoOut : null
+                wicketPayload ? 1 : 0,
+                wicketPayload ? wicketPayload.type : null,
+                wicketPayload ? wicketPayload.whoOut : null,
+                wicketPayload ? wicketPayload.fielderId : null,
+                wicketPayload ? wicketPayload.nextBatsmanId : null
             );
         } catch (e) {
             console.error(e);
-        }
-
-        let newBalls = score.balls;
-        let newOvers = score.overs;
-        let currentOverComplete = false;
-        let newRecent = [...score.recentBalls];
-
-        if (validBall) {
-            newBalls += 1;
-            if (newBalls === 6) {
-                newBalls = 0;
-                newOvers += 1;
-                currentOverComplete = true;
-                newRecent = [];
-            }
-        }
-
-        if (!currentOverComplete) {
-            let ballLabel = `${totalDeliveryRuns}`;
-            if (isWicket) ballLabel = 'W';
-            else if (extras.wide) ballLabel = `${totalDeliveryRuns}wd`;
-            else if (extras.noBall) ballLabel = `${totalDeliveryRuns}nb`;
-            newRecent.push(ballLabel);
-        }
-
-        let inningsJustEnded = false;
-
-        if (isWinningRun || (score.inning === 2 && score.target && score.totalRuns + totalDeliveryRuns >= score.target)) {
-            const wicketsLeft = 10 - (isWicket ? score.wickets + 1 : score.wickets);
-            handleMatchEnd(battingTeam?.name || 'Batting Team', `by ${wicketsLeft} wickets`);
-            inningsJustEnded = true;
-        } else if (matchData && newOvers >= (matchData.overs || 16)) {
-            if (score.inning === 1) {
-                inningsJustEnded = true;
-                const target = score.totalRuns + totalDeliveryRuns + 1;
-                setPendingTarget(target);
-                setShowInningBreakModal(true);
-            } else {
-                const finalScore = score.totalRuns + totalDeliveryRuns;
-                const target = score.target || 0;
-                if (finalScore < target - 1) {
-                    const runMargin = target - 1 - finalScore;
-                    handleMatchEnd(bowlingTeam?.name || 'Bowling Team', `by ${runMargin} runs`);
-                } else if (finalScore === target - 1) {
-                    handleMatchEnd('Match Tied', '');
-                }
-            }
-        }
-
-        const newTotal = score.totalRuns + totalDeliveryRuns;
-        setScore((prev) => ({
-            ...prev,
-            totalRuns: newTotal,
-            wickets: isWicket ? prev.wickets + 1 : prev.wickets,
-            balls: newBalls,
-            overs: newOvers,
-            recentBalls: newRecent,
-        }));
-
-        updateStats(runsScored, validBall, isExtra, extras.noBall, isWicket, extraRuns, extraType);
-
-        if (isWicket) {
-            setPartnership({ runs: 0, balls: 0 });
-        } else {
-            setPartnership((prev) => ({
-                runs: prev.runs + totalDeliveryRuns,
-                balls: validBall ? prev.balls + 1 : prev.balls,
-            }));
+            showNotice('Failed to record delivery.');
+            return;
         }
 
         setExtras({ wide: false, noBall: false, byes: false, legByes: false, wicket: false });
+        setManualStrikeSwapped(false);
+        setPendingBowlerId(null);
 
-        if (isWicket) {
-            handleWicketStateUpdate(wicketInfo);
-        } else if (runsScored % 2 !== 0) {
-            swapBatsman();
+        const loaded = loadMatchFromDb();
+        if (loaded) {
+            syncTransitions(loaded.derived);
         }
-
-        if (currentOverComplete && !inningsJustEnded && !isWinningRun) {
-            swapBatsman();
-            setShowBowlerModal(true);
-        }
-    };
-
-    const updateStats = (
-        runs: number,
-        validBall: boolean,
-        isExtra: boolean,
-        isNoBall: boolean,
-        isWicket: boolean,
-        extraRuns: number,
-        extraType: string | null
-    ) => {
-        if (!isExtra || isNoBall) {
-            setBatsmanStats((prev) => ({
-                ...prev,
-                striker: {
-                    ...prev.striker,
-                    runs: prev.striker.runs + runs,
-                    balls: validBall ? prev.striker.balls + 1 : prev.striker.balls,
-                    fours: runs === 4 ? prev.striker.fours + 1 : prev.striker.fours,
-                    sixes: runs === 6 ? prev.striker.sixes + 1 : prev.striker.sixes,
-                },
-            }));
-        }
-        setBowlerStats((prev) => ({
-            ...prev,
-            runs: prev.runs + (isExtra ? (isNoBall || extras.wide ? 1 + runs : runs) : runs),
-            wickets: isWicket && wicketDetails.type !== 'Run Out' ? prev.wickets + 1 : prev.wickets,
-            overs: validBall && score.balls + 1 === 6 ? prev.overs + 1 : prev.overs,
-        }));
-
-        if (isExtra && extraType) {
-            const mappedKey =
-                extraType === 'WD'
-                    ? 'wide'
-                    : extraType === 'NB'
-                    ? 'noBall'
-                    : extraType === 'B'
-                    ? 'byes'
-                    : 'legByes';
-            setExtraStats((prev) => ({
-                ...prev,
-                [mappedKey]: prev[mappedKey] + extraRuns,
-                total: prev.total + extraRuns,
-            }));
-        }
-    };
-
-    const startSecondInnings = (targetScore: number) => {
-        setShowInningBreakModal(false);
-        const newBat = bowlingTeam;
-        const newBowl = battingTeam;
-        setBattingTeam(newBat);
-        setBowlingTeam(newBowl);
-
-        setScore({
-            totalRuns: 0,
-            wickets: 0,
-            overs: 0,
-            balls: 0,
-            currentBatsmanId: 0,
-            nonStrikerId: 0,
-            currentBowlerId: 0,
-            recentBalls: [],
-            inning: 2,
-            target: targetScore,
-        });
-
-        setPartnership({ runs: 0, balls: 0 });
-        setExtraStats({ wide: 0, noBall: 0, byes: 0, legByes: 0, total: 0 });
-        setBatsmanStats({
-            striker: { name: 'Striker', runs: 0, balls: 0, fours: 0, sixes: 0 },
-            nonStriker: { name: 'Non-Striker', runs: 0, balls: 0, fours: 0, sixes: 0 },
-        });
-        setBowlerStats({ name: 'Bowler', overs: 0, maidens: 0, runs: 0, wickets: 0 });
-        setNewInningPlayers({ striker: '', nonStriker: '', bowler: '' });
-        setShowInningStartModal(true);
-    };
-
-    const confirmSecondInningsPlayers = () => {
-        const { striker, nonStriker, bowler } = newInningPlayers;
-        if (!striker.trim() || !nonStriker.trim() || !bowler.trim()) {
-            showNotice('Enter striker, non-striker, and bowler names.');
-            return;
-        }
-
-        const batTeamId = battingTeam?.id || 0;
-        const bowlTeamId = bowlingTeam?.id || 0;
-
-        const p1 = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', striker.trim(), batTeamId);
-        const p2 = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', nonStriker.trim(), batTeamId);
-        const p3 = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', bowler.trim(), bowlTeamId);
-
-        setAllPlayers((prev) => [
-            ...prev,
-            { id: p1.lastInsertRowId, name: striker.trim(), team_id: batTeamId },
-            { id: p2.lastInsertRowId, name: nonStriker.trim(), team_id: batTeamId },
-            { id: p3.lastInsertRowId, name: bowler.trim(), team_id: bowlTeamId },
-        ]);
-
-        setScore((prev) => ({
-            ...prev,
-            currentBatsmanId: p1.lastInsertRowId,
-            nonStrikerId: p2.lastInsertRowId,
-            currentBowlerId: p3.lastInsertRowId,
-        }));
-
-        setBatsmanStats({
-            striker: { name: striker.trim(), runs: 0, balls: 0, fours: 0, sixes: 0 },
-            nonStriker: { name: nonStriker.trim(), runs: 0, balls: 0, fours: 0, sixes: 0 },
-        });
-        setBowlerStats({ name: bowler.trim(), overs: 0, maidens: 0, runs: 0, wickets: 0 });
-        setWicketDetails((prev) => ({ ...prev, whoOut: p1.lastInsertRowId }));
-
-        setShowInningStartModal(false);
-    };
-
-    const handleWicketStateUpdate = (info: any) => {
-        const newPlayerName = info.newBatsmanName?.trim() || 'New Player';
-        const teamId = battingTeam?.id || 0;
-        let newPlayerId = 0;
-        try {
-            const res = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', newPlayerName, teamId);
-            newPlayerId = res.lastInsertRowId;
-            setAllPlayers((prev) => [...prev, { id: newPlayerId, name: newPlayerName, team_id: teamId }]);
-        } catch (e) {}
-
-        if (info.whoOut === score.currentBatsmanId) {
-            setScore((prev) => ({ ...prev, currentBatsmanId: newPlayerId }));
-            setBatsmanStats((prev) => ({
-                ...prev,
-                striker: { name: newPlayerName, runs: 0, balls: 0, fours: 0, sixes: 0 },
-            }));
-        } else {
-            setScore((prev) => ({ ...prev, nonStrikerId: newPlayerId }));
-            setBatsmanStats((prev) => ({
-                ...prev,
-                nonStriker: { name: newPlayerName, runs: 0, balls: 0, fours: 0, sixes: 0 },
-            }));
-        }
-    };
-
-    const swapBatsman = () => {
-        setBatsmanStats((prev) => ({ striker: prev.nonStriker, nonStriker: prev.striker }));
-        setScore((prev) => ({
-            ...prev,
-            currentBatsmanId: prev.nonStrikerId,
-            nonStrikerId: prev.currentBatsmanId,
-        }));
     };
 
     const confirmWicket = () => {
-        if (!wicketDetails.newBatsmanName.trim()) {
-            showNotice('Please enter new batsman name.');
+        if (!activeState) return;
+        if (wicketBatsmanError || fielderError) return;
+        if (needsFielderInput && !wicketDetails.fielderName.trim()) {
+            showNotice('Enter fielder name.');
             return;
         }
-        if ((wicketDetails.type === 'Caught' || wicketDetails.type === 'Run Out') && !wicketDetails.fielderName.trim()) {
-            showNotice('Please enter fielder name.');
+        if (!isTenthWicket && !wicketDetails.newBatsmanName.trim()) {
+            showNotice('Enter incoming batsman name.');
             return;
         }
+
+        let fielderId: number | null = null;
+        if (needsFielderInput) {
+            fielderId = getOrCreatePlayer(activeState.bowlingTeam.id, wicketDetails.fielderName).id;
+        }
+
+        let nextBatsmanId: number | null = null;
+        if (!isTenthWicket) {
+            nextBatsmanId = getOrCreatePlayer(activeState.battingTeam.id, wicketDetails.newBatsmanName).id;
+        }
+
         setShowWicketModal(false);
-        processDelivery(0, wicketDetails);
+        recordDelivery(0, {
+            type: wicketDetails.type,
+            whoOut: wicketDetails.whoOut || displayStrikerId,
+            fielderId,
+            nextBatsmanId,
+        });
     };
 
     const confirmNewBowler = (player?: Player) => {
-        let selectedPlayer = player;
-        if (!selectedPlayer && newBowlerName.trim()) {
-            const teamId = bowlingTeam?.id || 0;
-            try {
-                const res = db.runSync('INSERT INTO Players (name, team_id) VALUES (?, ?)', newBowlerName.trim(), teamId);
-                selectedPlayer = { id: res.lastInsertRowId, name: newBowlerName.trim(), team_id: teamId };
-                setAllPlayers((prev) => [...prev, selectedPlayer!]);
-            } catch (e) {}
+        if (!activeState) return;
+        if (!player && bowlerInputError) return;
+
+        let selected: Player | null = player ?? null;
+        if (!selected && newBowlerName.trim()) {
+            selected = getOrCreatePlayer(activeState.bowlingTeam.id, newBowlerName);
         }
-        if (!selectedPlayer) {
-            showNotice('Select or enter a bowler name.');
+        if (!selected) {
+            showNotice('Select or enter a bowler.');
             return;
         }
-        if (selectedPlayer.id === score.currentBowlerId) {
-            showNotice('Select a different bowler for the new over.');
+        if (selected.id === activeState.previousOverBowlerId) {
+            showNotice('A bowler cannot bowl consecutive overs');
             return;
         }
-        setScore((prev) => ({ ...prev, currentBowlerId: selectedPlayer!.id }));
-        setBowlerStats({ name: selectedPlayer.name, overs: 0, maidens: 0, runs: 0, wickets: 0 });
+
+        setPendingBowlerId(selected.id);
         setNewBowlerName('');
         setShowBowlerModal(false);
+        loadMatchFromDb();
+    };
+
+    const confirmSecondInningsPlayers = () => {
+        if (!matchState) return;
+        const { striker, nonStriker, bowler } = newInningPlayers;
+        if (!striker.trim() || !nonStriker.trim() || !bowler.trim()) {
+            setInningStartError('Enter striker, non-striker, and opening bowler.');
+            return;
+        }
+        if (normalizePlayerName(striker) === normalizePlayerName(nonStriker)) {
+            setInningStartError('Striker and Non-Striker must be different players.');
+            return;
+        }
+
+        const batTeamId = matchState.firstBowlTeam.id;
+        const bowlTeamId = matchState.firstBatTeam.id;
+
+        if (
+            isTeamAtCap(batTeamId, striker) ||
+            isTeamAtCap(batTeamId, nonStriker) ||
+            isTeamAtCap(bowlTeamId, bowler)
+        ) {
+            setInningStartError('Maximum 11 players allowed per team.');
+            return;
+        }
+
+        const p1 = getOrCreatePlayer(batTeamId, striker);
+        const p2 = getOrCreatePlayer(batTeamId, nonStriker);
+        const p3 = getOrCreatePlayer(bowlTeamId, bowler);
+
+        db.runSync(
+            `UPDATE Matches SET inning1_completed = 1, inning2_striker_id = ?, inning2_non_striker_id = ?, inning2_bowler_id = ? WHERE id = ?`,
+            p1.id,
+            p2.id,
+            p3.id,
+            matchId
+        );
+
+        setInningStartError(null);
+        setShowInningStartModal(false);
+        setManualStrikeSwapped(false);
+        setPendingBowlerId(null);
+        loadMatchFromDb();
+    };
+
+    const handleCompleteInningsConfirm = () => {
+        if (!matchState) return;
+        setShowCompleteInningsModal(false);
+
+        if (matchState.activeInning === 1) {
+            db.runSync('UPDATE Matches SET inning1_completed = 1 WHERE id = ?', matchId);
+            setManualStrikeSwapped(false);
+            setPendingBowlerId(null);
+            setInningStartError(null);
+            setNewInningPlayers({ striker: '', nonStriker: '', bowler: '' });
+            loadMatchFromDb();
+            setShowInningStartModal(true);
+            return;
+        }
+
+        const inn2Total = matchState.inning2?.totalRuns ?? 0;
+        const inn2Wickets = matchState.inning2?.wickets ?? 0;
+        const res = computeMatchResult(
+            matchState.inning1.totalRuns,
+            inn2Total,
+            inn2Wickets,
+            matchState.firstBatTeam.name,
+            matchState.firstBowlTeam.name
+        );
+        db.runSync('UPDATE Matches SET is_completed = 1 WHERE id = ?', matchId);
+        navigation.navigate('MatchResult', { winner: res.winner, margin: res.margin });
     };
 
     const handleUndo = () => {
+        if (!matchState) return;
         try {
             const lastDelivery = db.getFirstSync(
-                'SELECT * FROM Deliveries WHERE match_id = ? AND inning = ? ORDER BY id DESC LIMIT 1',
-                matchId,
-                score.inning
-            ) as DeliveryRow | null;
+                'SELECT * FROM Deliveries WHERE match_id = ? ORDER BY inning DESC, id DESC LIMIT 1',
+                matchId
+            ) as Delivery | null;
+
+            const hasInn2Openers = Boolean(
+                matchState.match.inning2_striker_id &&
+                    matchState.match.inning2_non_striker_id &&
+                    matchState.match.inning2_bowler_id
+            );
+
+            // Reversing 2nd-innings transition before any 2nd-innings delivery
+            if (matchState.activeInning === 2 && (!lastDelivery || lastDelivery.inning === 1)) {
+                if (hasInn2Openers) {
+                    db.runSync(
+                        'UPDATE Matches SET inning1_completed = 0, inning2_striker_id = NULL, inning2_non_striker_id = NULL, inning2_bowler_id = NULL, is_completed = 0 WHERE id = ?',
+                        matchId
+                    );
+                    if (lastDelivery && (matchState.inning1.isAllOut || matchState.inning1.isOversComplete)) {
+                        db.runSync('DELETE FROM Deliveries WHERE id = ?', lastDelivery.id);
+                    }
+                    setPendingBowlerId(null);
+                    setManualStrikeSwapped(false);
+                    setShowInningStartModal(false);
+                    setShowInningBreakModal(false);
+                    loadMatchFromDb();
+                    showNotice('Reverted to 1st innings.');
+                    return;
+                }
+            }
+
+            if (matchState.needsSecondInningsSetup) {
+                db.runSync('UPDATE Matches SET inning1_completed = 0, is_completed = 0 WHERE id = ?', matchId);
+                if (lastDelivery && (matchState.inning1.isAllOut || matchState.inning1.isOversComplete)) {
+                    db.runSync('DELETE FROM Deliveries WHERE id = ?', lastDelivery.id);
+                }
+                setShowInningBreakModal(false);
+                setShowInningStartModal(false);
+                setPendingBowlerId(null);
+                setManualStrikeSwapped(false);
+                loadMatchFromDb();
+                showNotice('Undid innings completion.');
+                return;
+            }
 
             if (!lastDelivery) {
-                showNotice('Nothing to undo in this innings.');
+                showNotice('Nothing to undo in this match.');
                 return;
             }
 
             db.runSync('DELETE FROM Deliveries WHERE id = ?', lastDelivery.id);
+            db.runSync('UPDATE Matches SET is_completed = 0 WHERE id = ?', matchId);
 
-            const runs = lastDelivery.runs;
-            const extrasRuns = lastDelivery.extras_runs || 0;
-            const totalThisBall = runs + extrasRuns;
-            const isWicket = lastDelivery.is_wicket === 1;
-            const isValid = lastDelivery.extras_type !== 'WD' && lastDelivery.extras_type !== 'NB';
-
-            let newBalls = score.balls;
-            let newOvers = score.overs;
-
-            if (isValid) {
-                newBalls -= 1;
-                if (newBalls < 0) {
-                    newBalls = 5;
-                    newOvers = Math.max(0, newOvers - 1);
-                }
-            }
-
-            const restoredOverDeliveries = db.getAllSync(
-                'SELECT runs, extras_type, extras_runs, is_wicket FROM Deliveries WHERE match_id = ? AND inning = ? AND over_number = ? ORDER BY id ASC',
-                matchId,
-                score.inning,
-                newOvers
-            ) as DeliveryRow[];
-            const newRecent = restoredOverDeliveries.map(formatBallLabel);
-
-            setScore((prev) => ({
-                ...prev,
-                totalRuns: Math.max(0, prev.totalRuns - totalThisBall),
-                wickets: Math.max(0, prev.wickets - (isWicket ? 1 : 0)),
-                overs: newOvers,
-                balls: newBalls,
-                currentBatsmanId: lastDelivery.batsman_id,
-                nonStrikerId: lastDelivery.non_striker_id,
-                currentBowlerId: lastDelivery.bowler_id,
-                recentBalls: newRecent,
-            }));
-
-            computePlayersStatsFromDb(
-                lastDelivery.batsman_id,
-                lastDelivery.non_striker_id,
-                lastDelivery.bowler_id,
-                score.inning,
-                allPlayers
-            );
-
-            if (lastDelivery.extras_type) {
-                const eType = lastDelivery.extras_type;
-                const mappedKey =
-                    eType === 'WD' ? 'wide' : eType === 'NB' ? 'noBall' : eType === 'B' ? 'byes' : 'legByes';
-                setExtraStats((prev) => ({
-                    ...prev,
-                    [mappedKey]: Math.max(0, prev[mappedKey] - extrasRuns),
-                    total: Math.max(0, prev.total - extrasRuns),
-                }));
-            }
-
-            recalcPartnershipForInning(score.inning);
+            setExtras({ wide: false, noBall: false, byes: false, legByes: false, wicket: false });
+            setPendingBowlerId(null);
+            setManualStrikeSwapped(false);
+            setShowBowlerModal(false);
+            loadMatchFromDb();
             showNotice('Undid last delivery.');
         } catch (e) {
             console.error(e);
@@ -852,33 +531,50 @@ export default function ScoringScreen() {
     };
 
     const handleRetire = () => {
-        setWicketDetails({ type: 'Retired', whoOut: score.currentBatsmanId, newBatsmanName: '', fielderName: '' });
+        if (!activeState) return;
+        setWicketDetails({
+            type: 'Retired',
+            whoOut: displayStrikerId,
+            newBatsmanName: '',
+            fielderName: '',
+        });
         setShowWicketModal(true);
     };
 
-    const bowlersList = allPlayers.filter((p) => p.team_id === bowlingTeam?.id);
-    const toggleExtra = (key: keyof typeof extras) => setExtras((prev) => ({ ...prev, [key]: !prev[key] }));
+    const toggleExtra = (key: keyof typeof extras) =>
+        setExtras((prev) => ({ ...prev, [key]: !prev[key] }));
 
-    const totalBallsBowled = score.overs * 6 + score.balls;
-    const matchTotalBalls = (matchData?.overs || 16) * 6;
-    const ballsRemaining = Math.max(0, matchTotalBalls - totalBallsBowled);
-    const crr = (score.totalRuns / (Math.max(1, totalBallsBowled) / 6)).toFixed(2);
-    const rrr = score.target
-        ? (Math.max(0, score.target - score.totalRuns) / (Math.max(1, ballsRemaining) / 6)).toFixed(2)
-        : null;
-    const runsNeeded = score.target ? Math.max(0, score.target - score.totalRuns) : null;
-
-    const getBallPillStyle = (ball: string) => {
-        if (ball === 'W') {
+    const getBallPillStyle = (badge: OverBallBadge) => {
+        if (badge.kind === 'wicket') {
             return { bg: theme.danger, border: theme.danger, text: theme.onDanger };
         }
-        if (ball === '4' || ball === '6') {
+        if (badge.kind === 'boundary') {
             return { bg: theme.primary, border: theme.primary, text: theme.onPrimary };
         }
-        if (ball.includes('wd') || ball.includes('nb')) {
+        if (badge.kind === 'extra') {
             return { bg: theme.warning, border: theme.warning, text: theme.onWarning };
         }
         return { bg: theme.surface, border: theme.border, text: theme.textPrimary };
+    };
+
+    const allowedDismissals = extras.noBall ? (['Run Out'] as const) : DISMISSAL_TYPES;
+    const bowlerModalSuggestions =
+        matchState?.activeInning === 2
+            ? matchState.inning2BowlerSuggestions
+            : matchState?.inning1BowlerSuggestions ?? [];
+
+    const activePart = activeState?.activePartnership;
+    const completedParts = (activeState?.partnerships ?? []).filter((p) => p.status === 'COMPLETED');
+
+    const getSecondInningsChipTarget = (name: string) => {
+        if (!newInningPlayers.striker.trim()) {
+            setNewInningPlayers((prev) => ({ ...prev, striker: name }));
+        } else if (
+            !newInningPlayers.nonStriker.trim() &&
+            normalizePlayerName(newInningPlayers.striker) !== normalizePlayerName(name)
+        ) {
+            setNewInningPlayers((prev) => ({ ...prev, nonStriker: name }));
+        }
     };
 
     return (
@@ -886,7 +582,7 @@ export default function ScoringScreen() {
             <AppHeader
                 compact
                 title="Live Scoring"
-                badge={score.inning === 2 ? '2ND INNINGS' : '1ST INNINGS'}
+                badge={activeState?.inning === 2 ? '2ND INNINGS' : '1ST INNINGS'}
                 onBack={() => navigation.goBack()}
             />
 
@@ -899,23 +595,24 @@ export default function ScoringScreen() {
             >
                 <View style={styles.matchRow}>
                     <Text style={[styles.teamName, { color: theme.scoreboxText }]} numberOfLines={1}>
-                        {battingTeam?.name || 'Batting'}
+                        {activeState?.battingTeam.name || 'Batting'}
                     </Text>
                     <Text style={[styles.vsText, { color: theme.scoreboxMuted }]} numberOfLines={1}>
-                        vs {bowlingTeam?.name || 'Bowling'} · {matchData?.overs || 16} OV
+                        vs {activeState?.bowlingTeam.name || 'Bowling'} · {matchState?.match.overs || 16} OV
                     </Text>
                 </View>
 
                 <View style={styles.mainScoreRow}>
                     <View>
                         <Text style={[styles.mainScore, styles.tabularNum, { color: theme.scoreboxText }]}>
-                            {score.totalRuns}
-                            <Text style={{ color: theme.scoreAccent }}>/{score.wickets}</Text>
+                            {activeState?.totalRuns ?? 0}
+                            <Text style={{ color: theme.scoreAccent }}>/{activeState?.wickets ?? 0}</Text>
                         </Text>
-                        {score.target !== null && (
+                        {activeState?.target !== null && activeState?.target !== undefined && (
                             <View style={[styles.targetPill, { backgroundColor: theme.warning }]}>
                                 <Text style={[styles.targetPillText, styles.tabularNum, { color: theme.onWarning }]}>
-                                    TARGET {score.target} · NEED {runsNeeded} OFF {ballsRemaining}B
+                                    TARGET {activeState.target} · NEED {activeState.runsNeeded} OFF{' '}
+                                    {activeState.ballsRemaining}B
                                 </Text>
                             </View>
                         )}
@@ -923,11 +620,11 @@ export default function ScoringScreen() {
 
                     <View style={styles.ratesBox}>
                         <Text style={[styles.oversText, styles.tabularNum, { color: theme.scoreboxText }]}>
-                            {score.overs}.{score.balls}
+                            {activeState?.oversDisplay ?? '0.0'}
                         </Text>
                         <Text style={[styles.rateText, styles.tabularNum, { color: theme.scoreboxMuted }]}>
-                            CRR {crr}
-                            {rrr ? ` · RRR ${rrr}` : ''}
+                            CRR {activeState?.crr ?? '0.00'}
+                            {activeState?.rrr ? ` · RRR ${activeState.rrr}` : ''}
                         </Text>
                     </View>
                 </View>
@@ -941,30 +638,30 @@ export default function ScoringScreen() {
                 ]}
             >
                 <Text style={[styles.overLabel, styles.tabularNum, { color: theme.textSecondary }]}>
-                    OVER {score.overs + 1}
+                    OVER {(activeState?.oversCompleted ?? 0) + 1}
                 </Text>
                 <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.ballList}
                 >
-                    {score.recentBalls.length === 0 ? (
+                    {!activeState || activeState.currentOverBalls.length === 0 ? (
                         <Text style={[styles.overEmptyText, { color: theme.textSecondary }]}>
                             Ready for ball 1
                         </Text>
                     ) : (
-                        score.recentBalls.map((b, i) => {
-                            const pill = getBallPillStyle(b);
+                        activeState.currentOverBalls.map((badge) => {
+                            const pill = getBallPillStyle(badge);
                             return (
                                 <View
-                                    key={`${b}-${i}`}
+                                    key={badge.id}
                                     style={[
                                         styles.ballPill,
                                         { backgroundColor: pill.bg, borderColor: pill.border },
                                     ]}
                                 >
                                     <Text style={[styles.ballText, styles.tabularNum, { color: pill.text }]}>
-                                        {b}
+                                        {badge.label}
                                     </Text>
                                 </View>
                             );
@@ -1002,36 +699,36 @@ export default function ScoringScreen() {
                     </View>
                     <View style={[styles.tableRow, { borderBottomColor: theme.borderSubtle }]}>
                         <Text style={[styles.cellName, { color: theme.textPrimary }]} numberOfLines={1}>
-                            {batsmanStats.striker.name} <Text style={{ color: theme.primary }}>●</Text>
+                            {strikerStat?.name || 'Striker'} <Text style={{ color: theme.primary }}>●</Text>
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textPrimary }]}>
-                            {batsmanStats.striker.runs}
+                            {strikerStat?.runs ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.striker.balls}
+                            {strikerStat?.balls ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.striker.fours}
+                            {strikerStat?.fours ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.striker.sixes}
+                            {strikerStat?.sixes ?? 0}
                         </Text>
                     </View>
                     <View style={[styles.tableRow, styles.tableRowLast]}>
                         <Text style={[styles.cellName, { color: theme.textPrimary }]} numberOfLines={1}>
-                            {batsmanStats.nonStriker.name}
+                            {nonStrikerStat?.name || 'Non-Striker'}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textPrimary }]}>
-                            {batsmanStats.nonStriker.runs}
+                            {nonStrikerStat?.runs ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.nonStriker.balls}
+                            {nonStrikerStat?.balls ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.nonStriker.fours}
+                            {nonStrikerStat?.fours ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {batsmanStats.nonStriker.sixes}
+                            {nonStrikerStat?.sixes ?? 0}
                         </Text>
                     </View>
                 </View>
@@ -1059,19 +756,19 @@ export default function ScoringScreen() {
                     </View>
                     <View style={[styles.tableRow, styles.tableRowLast]}>
                         <Text style={[styles.cellName, { color: theme.textPrimary }]} numberOfLines={1}>
-                            {bowlerStats.name}
+                            {displayBowlerName}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textPrimary }]}>
-                            {bowlerStats.overs}.{score.balls}
+                            {bowlerStat?.oversDisplay ?? '0.0'}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textSecondary }]}>
-                            {bowlerStats.maidens}
+                            {bowlerStat?.maidens ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textPrimary }]}>
-                            {bowlerStats.runs}
+                            {bowlerStat?.runsConceded ?? 0}
                         </Text>
                         <Text style={[styles.cell, styles.tabularNum, { color: theme.textPrimary }]}>
-                            {bowlerStats.wickets}
+                            {bowlerStat?.wickets ?? 0}
                         </Text>
                     </View>
                 </View>
@@ -1083,7 +780,7 @@ export default function ScoringScreen() {
                 </View>
             )}
 
-            {/* Non-Overlapping Docked Control Keypad (48dp+ touch targets, 8dp gaps) */}
+            {/* Non-Overlapping Docked Control Keypad */}
             <View
                 style={[
                     styles.controlPad,
@@ -1141,7 +838,7 @@ export default function ScoringScreen() {
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.actionButton, { backgroundColor: theme.keypadActionBg }]}
-                        onPress={swapBatsman}
+                        onPress={() => setManualStrikeSwapped((v) => !v)}
                         activeOpacity={0.8}
                     >
                         <Text style={[styles.actionText, { color: theme.keypadActionText }]}>Swap Strike</Text>
@@ -1233,11 +930,11 @@ export default function ScoringScreen() {
                                     styles.runButton,
                                     { backgroundColor: theme.keypadKeyBg, borderColor: theme.keypadKeyBorder },
                                 ]}
-                                onPress={() => handleScoreClick(0)}
+                                onPress={() => setShowCompleteInningsModal(true)}
                                 activeOpacity={0.8}
-                                accessibilityLabel="Dot ball"
+                                accessibilityLabel="Complete innings"
                             >
-                                <Text style={[styles.runButtonText, { color: theme.textPrimary }]}>•</Text>
+                                <Text style={[styles.runButtonText, { color: theme.textPrimary }]}>.</Text>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -1259,42 +956,58 @@ export default function ScoringScreen() {
                         ]}
                     >
                         <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
-                            {infoSheet === 'partnership' ? 'Current Partnership' : 'Extras Breakdown'}
+                            {infoSheet === 'partnership' ? 'Partnerships' : 'Extras Breakdown'}
                         </Text>
 
                         {infoSheet === 'partnership' ? (
-                            <View style={styles.statGrid}>
-                                <View
-                                    style={[
-                                        styles.statCell,
-                                        { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
-                                    ]}
-                                >
-                                    <Text style={[styles.label, { color: theme.textSecondary }]}>RUNS</Text>
-                                    <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
-                                        {partnership.runs}
-                                    </Text>
-                                </View>
-                                <View
-                                    style={[
-                                        styles.statCell,
-                                        { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
-                                    ]}
-                                >
-                                    <Text style={[styles.label, { color: theme.textSecondary }]}>BALLS</Text>
-                                    <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
-                                        {partnership.balls}
-                                    </Text>
-                                </View>
-                            </View>
+                            <ScrollView style={{ maxHeight: 320 }}>
+                                {activePart && (
+                                    <View style={styles.statGrid}>
+                                        <View
+                                            style={[
+                                                styles.statCell,
+                                                { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
+                                            ]}
+                                        >
+                                            <Text style={[styles.label, { color: theme.textSecondary }]}>
+                                                ACTIVE ({activePart.batter1Name} & {activePart.batter2Name})
+                                            </Text>
+                                            <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
+                                                {activePart.runs} ({activePart.balls})
+                                            </Text>
+                                            <Text style={[styles.partSplit, styles.tabularNum, { color: theme.textSecondary }]}>
+                                                {activePart.batter1Name}: {activePart.batter1Runs}({activePart.batter1Balls}) ·{' '}
+                                                {activePart.batter2Name}: {activePart.batter2Runs}({activePart.batter2Balls})
+                                            </Text>
+                                        </View>
+                                    </View>
+                                )}
+                                {completedParts.length > 0 && (
+                                    <View style={{ marginBottom: 12 }}>
+                                        <Text style={[styles.label, { color: theme.textSecondary }]}>
+                                            COMPLETED PARTNERSHIPS
+                                        </Text>
+                                        {completedParts.map((p) => (
+                                            <View
+                                                key={p.index}
+                                                style={[styles.modalItem, { borderBottomColor: theme.borderSubtle }]}
+                                            >
+                                                <Text style={[styles.modalItemText, { color: theme.textPrimary }]}>
+                                                    {p.batter1Name} & {p.batter2Name}: {p.runs} ({p.balls})
+                                                </Text>
+                                            </View>
+                                        ))}
+                                    </View>
+                                )}
+                            </ScrollView>
                         ) : (
                             <View style={styles.statGrid}>
                                 {[
-                                    { k: 'WD', v: extraStats.wide },
-                                    { k: 'NB', v: extraStats.noBall },
-                                    { k: 'B', v: extraStats.byes },
-                                    { k: 'LB', v: extraStats.legByes },
-                                    { k: 'TOTAL', v: extraStats.total },
+                                    { k: 'WD', v: activeState?.extras.wide ?? 0 },
+                                    { k: 'NB', v: activeState?.extras.noBall ?? 0 },
+                                    { k: 'B', v: activeState?.extras.byes ?? 0 },
+                                    { k: 'LB', v: activeState?.extras.legByes ?? 0 },
+                                    { k: 'TOTAL', v: activeState?.extras.total ?? 0 },
                                 ].map((item) => (
                                     <View
                                         key={item.k}
@@ -1322,6 +1035,46 @@ export default function ScoringScreen() {
                 </View>
             </Modal>
 
+            {/* Manual Complete Innings Dialog ("." Button) */}
+            <Modal
+                visible={showCompleteInningsModal}
+                animationType="fade"
+                transparent
+                onRequestClose={() => setShowCompleteInningsModal(false)}
+            >
+                <View style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}>
+                    <View
+                        style={[
+                            styles.modalContent,
+                            { backgroundColor: theme.surface, borderColor: theme.border },
+                        ]}
+                    >
+                        <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
+                            Complete {matchState?.activeInning === 2 ? '2nd' : '1st'} Innings?
+                        </Text>
+                        <Text style={[styles.breakBody, styles.tabularNum, { color: theme.textSecondary }]}>
+                            {matchState?.activeInning === 1
+                                ? `Lock ${activeState?.battingTeam.name} at ${activeState?.totalRuns ?? 0}/${activeState?.wickets ?? 0} (${activeState?.oversDisplay ?? '0.0'} ov) and begin the 2nd innings chase (Target ${(activeState?.totalRuns ?? 0) + 1}).`
+                                : `Finalize match at ${activeState?.totalRuns ?? 0}/${activeState?.wickets ?? 0} (${activeState?.oversDisplay ?? '0.0'} ov) against ${matchState?.inning1.totalRuns ?? 0} and declare the result.`}
+                        </Text>
+                        <TouchableOpacity
+                            style={[styles.saveButton, { backgroundColor: theme.primary }]}
+                            onPress={handleCompleteInningsConfirm}
+                        >
+                            <Text style={[styles.saveButtonText, { color: theme.onPrimary }]}>
+                                Complete Innings
+                            </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={styles.cancelButton}
+                            onPress={() => setShowCompleteInningsModal(false)}
+                        >
+                            <Text style={[styles.cancelButtonText, { color: theme.textSecondary }]}>Cancel</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
             {/* Innings Break Modal */}
             <Modal
                 visible={showInningBreakModal}
@@ -1339,16 +1092,22 @@ export default function ScoringScreen() {
                         <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>1st Innings Complete</Text>
                         <View style={[styles.targetModalBadge, { backgroundColor: theme.warning }]}>
                             <Text style={[styles.targetModalText, styles.tabularNum, { color: theme.onWarning }]}>
-                                TARGET: {pendingTarget} RUNS
+                                TARGET: {(matchState?.inning1.totalRuns ?? 0) + 1} RUNS
                             </Text>
                         </View>
                         <Text style={[styles.breakBody, styles.tabularNum, { color: theme.textSecondary }]}>
-                            Requires {pendingTarget} runs in {(matchData?.overs || 16) * 6} balls (RRR{' '}
-                            {(pendingTarget / (matchData?.overs || 16)).toFixed(2)}).
+                            Requires {(matchState?.inning1.totalRuns ?? 0) + 1} runs in{' '}
+                            {(matchState?.match.overs || 16) * 6} balls (RRR{' '}
+                            {(((matchState?.inning1.totalRuns ?? 0) + 1) / (matchState?.match.overs || 16)).toFixed(2)}).
                         </Text>
                         <TouchableOpacity
                             style={[styles.saveButton, { backgroundColor: theme.primary }]}
-                            onPress={() => startSecondInnings(pendingTarget)}
+                            onPress={() => {
+                                setShowInningBreakModal(false);
+                                setInningStartError(null);
+                                setNewInningPlayers({ striker: '', nonStriker: '', bowler: '' });
+                                setShowInningStartModal(true);
+                            }}
                         >
                             <Text style={[styles.saveButtonText, { color: theme.onPrimary }]}>
                                 Start 2nd Innings
@@ -1385,42 +1144,67 @@ export default function ScoringScreen() {
                                 styles.input,
                                 {
                                     backgroundColor: theme.surfaceSubtle,
-                                    borderColor: theme.border,
+                                    borderColor: bowlerInputError ? theme.danger : theme.border,
                                     color: theme.textPrimary,
                                 },
                             ]}
-                            placeholder="Enter new bowler name"
+                            placeholder="Enter bowler name"
                             placeholderTextColor={theme.textPlaceholder}
                             value={newBowlerName}
                             onChangeText={setNewBowlerName}
                         />
+                        {bowlerInputError && (
+                            <Text style={[styles.errorText, { color: theme.danger }]}>{bowlerInputError}</Text>
+                        )}
                         <TouchableOpacity
-                            style={[styles.saveButton, { backgroundColor: theme.primary }]}
+                            style={[
+                                styles.saveButton,
+                                { backgroundColor: bowlerInputError ? theme.surfaceSubtle : theme.primary },
+                            ]}
+                            disabled={Boolean(bowlerInputError)}
                             onPress={() => confirmNewBowler(undefined)}
                         >
-                            <Text style={[styles.saveButtonText, { color: theme.onPrimary }]}>
+                            <Text
+                                style={[
+                                    styles.saveButtonText,
+                                    { color: bowlerInputError ? theme.textSecondary : theme.onPrimary },
+                                ]}
+                            >
                                 Add & Select Bowler
                             </Text>
                         </TouchableOpacity>
 
-                        {bowlersList.length > 0 && (
+                        {bowlerModalSuggestions.length > 0 && (
                             <>
                                 <Text style={[styles.label, { color: theme.textSecondary, marginTop: 16 }]}>
-                                    EXISTING BOWLERS
+                                    {matchState?.activeInning === 2 ? 'FIELDING ROSTER & BOWLERS' : 'EXISTING BOWLERS'}
                                 </Text>
-                                <ScrollView style={{ maxHeight: 160 }}>
-                                    {bowlersList.map((p) => (
-                                        <TouchableOpacity
-                                            key={p.id}
-                                            style={[styles.modalItem, { borderBottomColor: theme.borderSubtle }]}
-                                            onPress={() => confirmNewBowler(p)}
-                                        >
-                                            <Text style={[styles.modalItemText, { color: theme.textPrimary }]}>
-                                                {p.name}{' '}
-                                                {p.id === score.currentBowlerId ? '(Previous Over)' : ''}
-                                            </Text>
-                                        </TouchableOpacity>
-                                    ))}
+                                <ScrollView style={{ maxHeight: 170 }}>
+                                    <View style={styles.chipWrap}>
+                                        {bowlerModalSuggestions.map((p) => {
+                                            const isPrevOver = p.id === activeState?.previousOverBowlerId;
+                                            return (
+                                                <TouchableOpacity
+                                                    key={p.id}
+                                                    disabled={isPrevOver}
+                                                    style={[
+                                                        styles.chip,
+                                                        {
+                                                            backgroundColor: theme.surfaceSubtle,
+                                                            borderColor: theme.border,
+                                                            opacity: isPrevOver ? 0.45 : 1,
+                                                        },
+                                                    ]}
+                                                    onPress={() => confirmNewBowler(p)}
+                                                >
+                                                    <Text style={[styles.chipText, { color: theme.textPrimary }]}>
+                                                        {p.name}
+                                                        {isPrevOver ? ' (Prev Over)' : ''}
+                                                    </Text>
+                                                </TouchableOpacity>
+                                            );
+                                        })}
+                                    </View>
                                 </ScrollView>
                             </>
                         )}
@@ -1439,159 +1223,252 @@ export default function ScoringScreen() {
                     style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}
                     behavior={Platform.OS === 'ios' ? 'padding' : undefined}
                 >
-                    <View
-                        style={[
-                            styles.modalContent,
-                            { backgroundColor: theme.surface, borderColor: theme.border },
-                        ]}
-                    >
-                        <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Wicket Details</Text>
+                    <ScrollView contentContainerStyle={styles.modalScrollCenter} keyboardShouldPersistTaps="handled">
+                        <View
+                            style={[
+                                styles.modalContent,
+                                { backgroundColor: theme.surface, borderColor: theme.border },
+                            ]}
+                        >
+                            <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Wicket Details</Text>
 
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>HOW OUT</Text>
-                        <View style={styles.chipWrap}>
-                            {['Caught', 'Bowled', 'LBW', 'Run Out', 'Retired'].map((t) => {
-                                const selected = wicketDetails.type === t;
-                                return (
-                                    <TouchableOpacity
-                                        key={t}
+                            <Text style={[styles.label, { color: theme.textSecondary }]}>HOW OUT</Text>
+                            <View style={styles.chipWrap}>
+                                {allowedDismissals.map((t) => {
+                                    const selected = wicketDetails.type === t;
+                                    return (
+                                        <TouchableOpacity
+                                            key={t}
+                                            style={[
+                                                styles.chip,
+                                                {
+                                                    backgroundColor: selected ? theme.danger : theme.surfaceSubtle,
+                                                    borderColor: selected ? theme.danger : theme.border,
+                                                },
+                                            ]}
+                                            onPress={() =>
+                                                setWicketDetails((prev) => ({
+                                                    ...prev,
+                                                    type: t,
+                                                    fielderName: dismissalRequiresFielder(t) ? prev.fielderName : '',
+                                                }))
+                                            }
+                                        >
+                                            <Text
+                                                style={[
+                                                    styles.chipText,
+                                                    { color: selected ? theme.onDanger : theme.textPrimary },
+                                                ]}
+                                            >
+                                                {t}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
+
+                            <Text style={[styles.label, { color: theme.textSecondary }]}>WHO OUT?</Text>
+                            <View style={styles.chipWrap}>
+                                <TouchableOpacity
+                                    style={[
+                                        styles.chip,
+                                        {
+                                            backgroundColor:
+                                                wicketDetails.whoOut === displayStrikerId
+                                                    ? theme.primary
+                                                    : theme.surfaceSubtle,
+                                            borderColor:
+                                                wicketDetails.whoOut === displayStrikerId
+                                                    ? theme.primary
+                                                    : theme.border,
+                                        },
+                                    ]}
+                                    onPress={() =>
+                                        setWicketDetails((prev) => ({ ...prev, whoOut: displayStrikerId }))
+                                    }
+                                >
+                                    <Text
                                         style={[
-                                            styles.chip,
+                                            styles.chipText,
                                             {
-                                                backgroundColor: selected ? theme.danger : theme.surfaceSubtle,
-                                                borderColor: selected ? theme.danger : theme.border,
+                                                color:
+                                                    wicketDetails.whoOut === displayStrikerId
+                                                        ? theme.onPrimary
+                                                        : theme.textPrimary,
                                             },
                                         ]}
-                                        onPress={() => setWicketDetails((prev) => ({ ...prev, type: t }))}
                                     >
-                                        <Text
-                                            style={[
-                                                styles.chipText,
-                                                { color: selected ? theme.onDanger : theme.textPrimary },
-                                            ]}
-                                        >
-                                            {t}
+                                        {strikerStat?.name || 'Striker'}
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={[
+                                        styles.chip,
+                                        {
+                                            backgroundColor:
+                                                wicketDetails.whoOut === displayNonStrikerId
+                                                    ? theme.primary
+                                                    : theme.surfaceSubtle,
+                                            borderColor:
+                                                wicketDetails.whoOut === displayNonStrikerId
+                                                    ? theme.primary
+                                                    : theme.border,
+                                        },
+                                    ]}
+                                    onPress={() =>
+                                        setWicketDetails((prev) => ({ ...prev, whoOut: displayNonStrikerId }))
+                                    }
+                                >
+                                    <Text
+                                        style={[
+                                            styles.chipText,
+                                            {
+                                                color:
+                                                    wicketDetails.whoOut === displayNonStrikerId
+                                                        ? theme.onPrimary
+                                                        : theme.textPrimary,
+                                            },
+                                        ]}
+                                    >
+                                        {nonStrikerStat?.name || 'Non-Striker'}
+                                    </Text>
+                                </TouchableOpacity>
+                            </View>
+
+                            {needsFielderInput && (
+                                <>
+                                    <Text style={[styles.label, { color: theme.textSecondary }]}>
+                                        WHO CAUGHT / ASSISTED?
+                                    </Text>
+                                    <TextInput
+                                        style={[
+                                            styles.input,
+                                            {
+                                                backgroundColor: theme.surfaceSubtle,
+                                                borderColor: fielderError ? theme.danger : theme.border,
+                                                color: theme.textPrimary,
+                                            },
+                                        ]}
+                                        placeholder="Enter fielder name"
+                                        placeholderTextColor={theme.textPlaceholder}
+                                        value={wicketDetails.fielderName}
+                                        onChangeText={(t) =>
+                                            setWicketDetails((prev) => ({ ...prev, fielderName: t }))
+                                        }
+                                    />
+                                    {fielderError && (
+                                        <Text style={[styles.errorText, { color: theme.danger }]}>{fielderError}</Text>
+                                    )}
+                                    {(matchState?.activeFieldingSuggestions.length ?? 0) > 0 && (
+                                        <View style={styles.chipWrap}>
+                                            {matchState!.activeFieldingSuggestions.map((p) => (
+                                                <TouchableOpacity
+                                                    key={p.id}
+                                                    style={[
+                                                        styles.chip,
+                                                        {
+                                                            backgroundColor: theme.surfaceSubtle,
+                                                            borderColor: theme.border,
+                                                        },
+                                                    ]}
+                                                    onPress={() =>
+                                                        setWicketDetails((prev) => ({ ...prev, fielderName: p.name }))
+                                                    }
+                                                >
+                                                    <Text style={[styles.chipText, { color: theme.textPrimary }]}>
+                                                        {p.name}
+                                                    </Text>
+                                                </TouchableOpacity>
+                                            ))}
+                                        </View>
+                                    )}
+                                </>
+                            )}
+
+                            {!isTenthWicket && (
+                                <>
+                                    <Text style={[styles.label, { color: theme.textSecondary }]}>NEW BATSMAN</Text>
+                                    <TextInput
+                                        style={[
+                                            styles.input,
+                                            {
+                                                backgroundColor: theme.surfaceSubtle,
+                                                borderColor: wicketBatsmanError ? theme.danger : theme.border,
+                                                color: theme.textPrimary,
+                                            },
+                                        ]}
+                                        placeholder="Enter incoming batsman"
+                                        placeholderTextColor={theme.textPlaceholder}
+                                        value={wicketDetails.newBatsmanName}
+                                        onChangeText={(t) =>
+                                            setWicketDetails((prev) => ({ ...prev, newBatsmanName: t }))
+                                        }
+                                    />
+                                    {wicketBatsmanError && (
+                                        <Text style={[styles.errorText, { color: theme.danger }]}>
+                                            {wicketBatsmanError}
                                         </Text>
-                                    </TouchableOpacity>
-                                );
-                            })}
-                        </View>
+                                    )}
+                                    {matchState?.activeInning === 2 &&
+                                        matchState.inning2BatterSuggestions.length > 0 && (
+                                            <View style={styles.chipWrap}>
+                                                {matchState.inning2BatterSuggestions.map((p) => (
+                                                    <TouchableOpacity
+                                                        key={p.id}
+                                                        style={[
+                                                            styles.chip,
+                                                            {
+                                                                backgroundColor: theme.surfaceSubtle,
+                                                                borderColor: theme.border,
+                                                            },
+                                                        ]}
+                                                        onPress={() =>
+                                                            setWicketDetails((prev) => ({
+                                                                ...prev,
+                                                                newBatsmanName: p.name,
+                                                            }))
+                                                        }
+                                                    >
+                                                        <Text style={[styles.chipText, { color: theme.textPrimary }]}>
+                                                            {p.name}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                ))}
+                                            </View>
+                                        )}
+                                </>
+                            )}
 
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>WHO OUT</Text>
-                        <View style={styles.chipWrap}>
                             <TouchableOpacity
                                 style={[
-                                    styles.chip,
+                                    styles.saveButton,
                                     {
                                         backgroundColor:
-                                            wicketDetails.whoOut === score.currentBatsmanId
-                                                ? theme.primary
-                                                : theme.surfaceSubtle,
-                                        borderColor:
-                                            wicketDetails.whoOut === score.currentBatsmanId
-                                                ? theme.primary
-                                                : theme.border,
+                                            wicketBatsmanError || fielderError ? theme.surfaceSubtle : theme.danger,
                                     },
                                 ]}
-                                onPress={() =>
-                                    setWicketDetails((prev) => ({ ...prev, whoOut: score.currentBatsmanId }))
-                                }
+                                disabled={Boolean(wicketBatsmanError || fielderError)}
+                                onPress={confirmWicket}
                             >
                                 <Text
                                     style={[
-                                        styles.chipText,
+                                        styles.saveButtonText,
                                         {
                                             color:
-                                                wicketDetails.whoOut === score.currentBatsmanId
-                                                    ? theme.onPrimary
-                                                    : theme.textPrimary,
+                                                wicketBatsmanError || fielderError
+                                                    ? theme.textSecondary
+                                                    : theme.onDanger,
                                         },
                                     ]}
                                 >
-                                    {batsmanStats.striker.name}
+                                    {isTenthWicket ? 'Confirm All Out' : 'Confirm Wicket'}
                                 </Text>
                             </TouchableOpacity>
-                            <TouchableOpacity
-                                style={[
-                                    styles.chip,
-                                    {
-                                        backgroundColor:
-                                            wicketDetails.whoOut === score.nonStrikerId
-                                                ? theme.primary
-                                                : theme.surfaceSubtle,
-                                        borderColor:
-                                            wicketDetails.whoOut === score.nonStrikerId
-                                                ? theme.primary
-                                                : theme.border,
-                                    },
-                                ]}
-                                onPress={() =>
-                                    setWicketDetails((prev) => ({ ...prev, whoOut: score.nonStrikerId }))
-                                }
-                            >
-                                <Text
-                                    style={[
-                                        styles.chipText,
-                                        {
-                                            color:
-                                                wicketDetails.whoOut === score.nonStrikerId
-                                                    ? theme.onPrimary
-                                                    : theme.textPrimary,
-                                        },
-                                    ]}
-                                >
-                                    {batsmanStats.nonStriker.name}
-                                </Text>
+                            <TouchableOpacity style={styles.cancelButton} onPress={() => setShowWicketModal(false)}>
+                                <Text style={[styles.cancelButtonText, { color: theme.textSecondary }]}>Cancel</Text>
                             </TouchableOpacity>
                         </View>
-
-                        {(wicketDetails.type === 'Caught' || wicketDetails.type === 'Run Out') && (
-                            <>
-                                <Text style={[styles.label, { color: theme.textSecondary }]}>
-                                    FIELDER / THROWER
-                                </Text>
-                                <TextInput
-                                    style={[
-                                        styles.input,
-                                        {
-                                            backgroundColor: theme.surfaceSubtle,
-                                            borderColor: theme.border,
-                                            color: theme.textPrimary,
-                                        },
-                                    ]}
-                                    placeholder="Enter fielder name"
-                                    placeholderTextColor={theme.textPlaceholder}
-                                    value={wicketDetails.fielderName}
-                                    onChangeText={(t) => setWicketDetails((prev) => ({ ...prev, fielderName: t }))}
-                                />
-                            </>
-                        )}
-
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>NEW BATSMAN</Text>
-                        <TextInput
-                            style={[
-                                styles.input,
-                                {
-                                    backgroundColor: theme.surfaceSubtle,
-                                    borderColor: theme.border,
-                                    color: theme.textPrimary,
-                                },
-                            ]}
-                            placeholder="Enter incoming batsman"
-                            placeholderTextColor={theme.textPlaceholder}
-                            value={wicketDetails.newBatsmanName}
-                            onChangeText={(t) => setWicketDetails((prev) => ({ ...prev, newBatsmanName: t }))}
-                        />
-
-                        <TouchableOpacity
-                            style={[styles.saveButton, { backgroundColor: theme.danger }]}
-                            onPress={confirmWicket}
-                        >
-                            <Text style={[styles.saveButtonText, { color: theme.onDanger }]}>Confirm Wicket</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.cancelButton} onPress={() => setShowWicketModal(false)}>
-                            <Text style={[styles.cancelButtonText, { color: theme.textSecondary }]}>Cancel</Text>
-                        </TouchableOpacity>
-                    </View>
+                    </ScrollView>
                 </KeyboardAvoidingView>
             </Modal>
 
@@ -1606,74 +1483,146 @@ export default function ScoringScreen() {
                     style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}
                     behavior={Platform.OS === 'ios' ? 'padding' : undefined}
                 >
-                    <View
-                        style={[
-                            styles.modalContent,
-                            { backgroundColor: theme.surface, borderColor: theme.border },
-                        ]}
-                    >
-                        <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Start 2nd Innings</Text>
-                        <View style={[styles.targetModalBadge, { backgroundColor: theme.warning }]}>
-                            <Text style={[styles.targetModalText, styles.tabularNum, { color: theme.onWarning }]}>
-                                TARGET: {score.target}
-                            </Text>
-                        </View>
-
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>STRIKER</Text>
-                        <TextInput
+                    <ScrollView contentContainerStyle={styles.modalScrollCenter} keyboardShouldPersistTaps="handled">
+                        <View
                             style={[
-                                styles.input,
-                                {
-                                    backgroundColor: theme.surfaceSubtle,
-                                    borderColor: theme.border,
-                                    color: theme.textPrimary,
-                                },
+                                styles.modalContent,
+                                { backgroundColor: theme.surface, borderColor: theme.border },
                             ]}
-                            placeholder="Striker name"
-                            placeholderTextColor={theme.textPlaceholder}
-                            value={newInningPlayers.striker}
-                            onChangeText={(t) => setNewInningPlayers((prev) => ({ ...prev, striker: t }))}
-                        />
-
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>NON-STRIKER</Text>
-                        <TextInput
-                            style={[
-                                styles.input,
-                                {
-                                    backgroundColor: theme.surfaceSubtle,
-                                    borderColor: theme.border,
-                                    color: theme.textPrimary,
-                                },
-                            ]}
-                            placeholder="Non-striker name"
-                            placeholderTextColor={theme.textPlaceholder}
-                            value={newInningPlayers.nonStriker}
-                            onChangeText={(t) => setNewInningPlayers((prev) => ({ ...prev, nonStriker: t }))}
-                        />
-
-                        <Text style={[styles.label, { color: theme.textSecondary }]}>OPENING BOWLER</Text>
-                        <TextInput
-                            style={[
-                                styles.input,
-                                {
-                                    backgroundColor: theme.surfaceSubtle,
-                                    borderColor: theme.border,
-                                    color: theme.textPrimary,
-                                },
-                            ]}
-                            placeholder="Bowler name"
-                            placeholderTextColor={theme.textPlaceholder}
-                            value={newInningPlayers.bowler}
-                            onChangeText={(t) => setNewInningPlayers((prev) => ({ ...prev, bowler: t }))}
-                        />
-
-                        <TouchableOpacity
-                            style={[styles.saveButton, { backgroundColor: theme.primary }]}
-                            onPress={confirmSecondInningsPlayers}
                         >
-                            <Text style={[styles.saveButtonText, { color: theme.onPrimary }]}>Start 2nd Innings</Text>
-                        </TouchableOpacity>
-                    </View>
+                            <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Start 2nd Innings</Text>
+                            <View style={[styles.targetModalBadge, { backgroundColor: theme.warning }]}>
+                                <Text style={[styles.targetModalText, styles.tabularNum, { color: theme.onWarning }]}>
+                                    TARGET: {(matchState?.inning1.totalRuns ?? 0) + 1}
+                                </Text>
+                            </View>
+
+                            {inningStartError && (
+                                <Text style={[styles.errorText, { color: theme.danger }]}>{inningStartError}</Text>
+                            )}
+
+                            <Text style={[styles.label, { color: theme.textSecondary }]}>STRIKER</Text>
+                            <TextInput
+                                style={[
+                                    styles.input,
+                                    {
+                                        backgroundColor: theme.surfaceSubtle,
+                                        borderColor: theme.border,
+                                        color: theme.textPrimary,
+                                    },
+                                ]}
+                                placeholder="Striker name"
+                                placeholderTextColor={theme.textPlaceholder}
+                                value={newInningPlayers.striker}
+                                onChangeText={(t) => {
+                                    setInningStartError(null);
+                                    setNewInningPlayers((prev) => ({ ...prev, striker: t }));
+                                }}
+                            />
+
+                            <Text style={[styles.label, { color: theme.textSecondary }]}>NON-STRIKER</Text>
+                            <TextInput
+                                style={[
+                                    styles.input,
+                                    {
+                                        backgroundColor: theme.surfaceSubtle,
+                                        borderColor: theme.border,
+                                        color: theme.textPrimary,
+                                    },
+                                ]}
+                                placeholder="Non-striker name"
+                                placeholderTextColor={theme.textPlaceholder}
+                                value={newInningPlayers.nonStriker}
+                                onChangeText={(t) => {
+                                    setInningStartError(null);
+                                    setNewInningPlayers((prev) => ({ ...prev, nonStriker: t }));
+                                }}
+                            />
+
+                            {(matchState?.inning2BatterSuggestions.length ?? 0) > 0 && (
+                                <View style={styles.chipWrap}>
+                                    {matchState!.inning2BatterSuggestions.map((p) => {
+                                        const picked =
+                                            normalizePlayerName(newInningPlayers.striker) ===
+                                                normalizePlayerName(p.name) ||
+                                            normalizePlayerName(newInningPlayers.nonStriker) ===
+                                                normalizePlayerName(p.name);
+                                        return (
+                                            <TouchableOpacity
+                                                key={p.id}
+                                                disabled={picked}
+                                                style={[
+                                                    styles.chip,
+                                                    {
+                                                        backgroundColor: theme.surfaceSubtle,
+                                                        borderColor: theme.border,
+                                                        opacity: picked ? 0.45 : 1,
+                                                    },
+                                                ]}
+                                                onPress={() => getSecondInningsChipTarget(p.name)}
+                                            >
+                                                <Text style={[styles.chipText, { color: theme.textPrimary }]}>
+                                                    {p.name}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        );
+                                    })}
+                                </View>
+                            )}
+
+                            <Text style={[styles.label, { color: theme.textSecondary }]}>OPENING BOWLER</Text>
+                            <TextInput
+                                style={[
+                                    styles.input,
+                                    {
+                                        backgroundColor: theme.surfaceSubtle,
+                                        borderColor: theme.border,
+                                        color: theme.textPrimary,
+                                    },
+                                ]}
+                                placeholder="Bowler name"
+                                placeholderTextColor={theme.textPlaceholder}
+                                value={newInningPlayers.bowler}
+                                onChangeText={(t) => {
+                                    setInningStartError(null);
+                                    setNewInningPlayers((prev) => ({ ...prev, bowler: t }));
+                                }}
+                            />
+
+                            {(matchState?.inning2BowlerSuggestions.length ?? 0) > 0 && (
+                                <View style={styles.chipWrap}>
+                                    {matchState!.inning2BowlerSuggestions.map((p) => (
+                                        <TouchableOpacity
+                                            key={p.id}
+                                            style={[
+                                                styles.chip,
+                                                {
+                                                    backgroundColor: theme.surfaceSubtle,
+                                                    borderColor: theme.border,
+                                                },
+                                            ]}
+                                            onPress={() =>
+                                                setNewInningPlayers((prev) => ({ ...prev, bowler: p.name }))
+                                            }
+                                        >
+                                            <Text style={[styles.chipText, { color: theme.textPrimary }]}>
+                                                {p.name}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            )}
+
+                            <TouchableOpacity
+                                style={[styles.saveButton, { backgroundColor: theme.primary }]}
+                                onPress={confirmSecondInningsPlayers}
+                            >
+                                <Text style={[styles.saveButtonText, { color: theme.onPrimary }]}>
+                                    Start 2nd Innings
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+                    </ScrollView>
                 </KeyboardAvoidingView>
             </Modal>
         </ScreenWrapper>
@@ -1931,6 +1880,10 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         padding: 20,
     },
+    modalScrollCenter: {
+        flexGrow: 1,
+        justifyContent: 'center',
+    },
     modalContent: {
         borderRadius: 16,
         padding: 20,
@@ -1979,6 +1932,12 @@ const styles = StyleSheet.create({
         fontSize: 22,
         fontWeight: '900',
     },
+    partSplit: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 12,
+        fontWeight: '600',
+        marginTop: 4,
+    },
     label: {
         fontFamily: APP_FONT_FAMILY,
         fontSize: 11,
@@ -1993,8 +1952,14 @@ const styles = StyleSheet.create({
         minHeight: 48,
         fontSize: 16,
         fontWeight: '600',
-        marginBottom: 14,
+        marginBottom: 10,
         borderWidth: 1,
+    },
+    errorText: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 12,
+        fontWeight: '700',
+        marginBottom: 10,
     },
     saveButton: {
         borderRadius: 12,
