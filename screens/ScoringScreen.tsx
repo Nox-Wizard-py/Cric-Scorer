@@ -27,6 +27,7 @@ import {
 } from '../engine/scoringEngine';
 import { ScreenWrapper } from '../components/ScreenWrapper';
 import { AppHeader } from '../components/AppHeader';
+import { PartnershipBottomSheet } from '../components/PartnershipBottomSheet';
 import { APP_FONT_FAMILY } from '../constants/colors';
 import { useTheme } from '../constants/theme';
 
@@ -563,9 +564,6 @@ export default function ScoringScreen() {
             ? matchState.inning2BowlerSuggestions
             : matchState?.inning1BowlerSuggestions ?? [];
 
-    const activePart = activeState?.activePartnership;
-    const completedParts = (activeState?.partnerships ?? []).filter((p) => p.status === 'COMPLETED');
-
     const getSecondInningsChipTarget = (name: string) => {
         if (!newInningPlayers.striker.trim()) {
             setNewInningPlayers((prev) => ({ ...prev, striker: name }));
@@ -941,9 +939,16 @@ export default function ScoringScreen() {
                 </View>
             </View>
 
-            {/* Partnership / Extras Sheet Modal */}
+            {/* Partnerships Bottom Sheet */}
+            <PartnershipBottomSheet
+                visible={infoSheet === 'partnership'}
+                partnerships={activeState?.partnerships ?? []}
+                onClose={() => setInfoSheet(null)}
+            />
+
+            {/* Extras Breakdown Modal */}
             <Modal
-                visible={infoSheet !== null}
+                visible={infoSheet === 'extras'}
                 animationType="fade"
                 transparent
                 onRequestClose={() => setInfoSheet(null)}
@@ -956,74 +961,31 @@ export default function ScoringScreen() {
                         ]}
                     >
                         <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
-                            {infoSheet === 'partnership' ? 'Partnerships' : 'Extras Breakdown'}
+                            Extras Breakdown
                         </Text>
 
-                        {infoSheet === 'partnership' ? (
-                            <ScrollView style={{ maxHeight: 320 }}>
-                                {activePart && (
-                                    <View style={styles.statGrid}>
-                                        <View
-                                            style={[
-                                                styles.statCell,
-                                                { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
-                                            ]}
-                                        >
-                                            <Text style={[styles.label, { color: theme.textSecondary }]}>
-                                                ACTIVE ({activePart.batter1Name} & {activePart.batter2Name})
-                                            </Text>
-                                            <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
-                                                {activePart.runs} ({activePart.balls})
-                                            </Text>
-                                            <Text style={[styles.partSplit, styles.tabularNum, { color: theme.textSecondary }]}>
-                                                {activePart.batter1Name}: {activePart.batter1Runs}({activePart.batter1Balls}) ·{' '}
-                                                {activePart.batter2Name}: {activePart.batter2Runs}({activePart.batter2Balls})
-                                            </Text>
-                                        </View>
-                                    </View>
-                                )}
-                                {completedParts.length > 0 && (
-                                    <View style={{ marginBottom: 12 }}>
-                                        <Text style={[styles.label, { color: theme.textSecondary }]}>
-                                            COMPLETED PARTNERSHIPS
-                                        </Text>
-                                        {completedParts.map((p) => (
-                                            <View
-                                                key={p.index}
-                                                style={[styles.modalItem, { borderBottomColor: theme.borderSubtle }]}
-                                            >
-                                                <Text style={[styles.modalItemText, { color: theme.textPrimary }]}>
-                                                    {p.batter1Name} & {p.batter2Name}: {p.runs} ({p.balls})
-                                                </Text>
-                                            </View>
-                                        ))}
-                                    </View>
-                                )}
-                            </ScrollView>
-                        ) : (
-                            <View style={styles.statGrid}>
-                                {[
-                                    { k: 'WD', v: activeState?.extras.wide ?? 0 },
-                                    { k: 'NB', v: activeState?.extras.noBall ?? 0 },
-                                    { k: 'B', v: activeState?.extras.byes ?? 0 },
-                                    { k: 'LB', v: activeState?.extras.legByes ?? 0 },
-                                    { k: 'TOTAL', v: activeState?.extras.total ?? 0 },
-                                ].map((item) => (
-                                    <View
-                                        key={item.k}
-                                        style={[
-                                            styles.statCell,
-                                            { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
-                                        ]}
-                                    >
-                                        <Text style={[styles.label, { color: theme.textSecondary }]}>{item.k}</Text>
-                                        <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
-                                            {item.v}
-                                        </Text>
-                                    </View>
-                                ))}
-                            </View>
-                        )}
+                        <View style={styles.statGrid}>
+                            {[
+                                { k: 'WD', v: activeState?.extras.wide ?? 0 },
+                                { k: 'NB', v: activeState?.extras.noBall ?? 0 },
+                                { k: 'B', v: activeState?.extras.byes ?? 0 },
+                                { k: 'LB', v: activeState?.extras.legByes ?? 0 },
+                                { k: 'TOTAL', v: activeState?.extras.total ?? 0 },
+                            ].map((item) => (
+                                <View
+                                    key={item.k}
+                                    style={[
+                                        styles.statCell,
+                                        { backgroundColor: theme.surfaceSubtle, borderColor: theme.border },
+                                    ]}
+                                >
+                                    <Text style={[styles.label, { color: theme.textSecondary }]}>{item.k}</Text>
+                                    <Text style={[styles.statBig, styles.tabularNum, { color: theme.textPrimary }]}>
+                                        {item.v}
+                                    </Text>
+                                </View>
+                            ))}
+                        </View>
 
                         <TouchableOpacity
                             style={[styles.saveButton, { backgroundColor: theme.primary }]}
@@ -1931,12 +1893,6 @@ const styles = StyleSheet.create({
         fontFamily: APP_FONT_FAMILY,
         fontSize: 22,
         fontWeight: '900',
-    },
-    partSplit: {
-        fontFamily: APP_FONT_FAMILY,
-        fontSize: 12,
-        fontWeight: '600',
-        marginTop: 4,
     },
     label: {
         fontFamily: APP_FONT_FAMILY,
