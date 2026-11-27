@@ -8,6 +8,7 @@ interface AppHeaderProps {
     title: string;
     subtitle?: string;
     badge?: string;
+    rightAction?: React.ReactNode;
     onBack?: () => void;
     compact?: boolean;
 }
@@ -16,6 +17,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
     title,
     subtitle,
     badge,
+    rightAction,
     onBack,
     compact = false,
 }) => {
@@ -57,7 +59,9 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
                     </View>
                 </View>
 
-                {badge ? (
+                {rightAction ? (
+                    rightAction
+                ) : badge ? (
                     <View style={[styles.badge, { backgroundColor: theme.headerSubtle }]}>
                         <Text style={[styles.badgeText, { color: theme.headerMuted }]}>{badge}</Text>
                     </View>
