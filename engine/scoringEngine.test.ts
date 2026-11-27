@@ -3,6 +3,8 @@ import {
     deriveMatchState,
     dismissalCreditsBowler,
     dismissalRequiresFielder,
+    formatDismissalText,
+    formatStrikeRate,
 } from './scoringEngine';
 import { Delivery, Match, Player, Team } from '../database/types';
 
@@ -247,5 +249,55 @@ state = deriveMatchState({
 });
 assert.equal(state.isMatchComplete, true);
 assert.deepEqual(state.result, { winner: 'Lions', margin: 'by 10 wickets', isTie: false });
+
+// 6. Scorecard dismissals, Strike Rate, Fall of Wickets & Over-by-Over Breakdown
+assert.equal(formatStrikeRate(45, 25), '180.00');
+assert.equal(formatStrikeRate(0, 0), '0.00');
+assert.equal(formatDismissalText('Caught', 'Starc', 'Cummins'), 'c Cummins b Starc');
+assert.equal(formatDismissalText('Bowled', 'Starc', null), 'b Starc');
+assert.equal(formatDismissalText('LBW', 'Starc', null), 'lbw b Starc');
+assert.equal(formatDismissalText('Stumped', 'Zampa', 'Carey'), 'st Carey b Zampa');
+assert.equal(formatDismissalText('Run Out', 'Starc', 'Cummins'), 'run out (Cummins)');
+assert.equal(formatDismissalText('Hit Wicket', 'Starc', null), 'hit wicket b Starc');
+assert.equal(formatDismissalText('Retired', 'Starc', null), 'retired');
+
+const scorecardOverDeliveries: Delivery[] = [
+    d({ id: 1, ball_number: 1, batsman_id: 101, non_striker_id: 102, bowler_id: 201, runs: 4 }),
+    d({ id: 2, ball_number: 2, batsman_id: 101, non_striker_id: 102, bowler_id: 201, runs: 0, extras_type: 'WD', extras_runs: 1 }),
+    d({ id: 3, ball_number: 2, batsman_id: 101, non_striker_id: 102, bowler_id: 201, runs: 0, extras_type: 'B', extras_runs: 6 }),
+    d({ id: 4, ball_number: 3, batsman_id: 101, non_striker_id: 102, bowler_id: 201, runs: 0, extras_type: 'LB', extras_runs: 1 }),
+    d({
+        id: 5,
+        ball_number: 4,
+        batsman_id: 102,
+        non_striker_id: 101,
+        bowler_id: 201,
+        runs: 0,
+        is_wicket: 1,
+        wicket_type: 'Caught',
+        player_out_id: 102,
+        fielder_id: 202,
+        next_batsman_id: 103,
+    }),
+    d({ id: 6, ball_number: 5, batsman_id: 103, non_striker_id: 101, bowler_id: 201, runs: 6 }),
+];
+
+state = deriveMatchState({ match: baseMatch, homeTeam, awayTeam, players, deliveries: scorecardOverDeliveries });
+assert.equal(state.inning1.batterStats[102].dismissalText, 'c Cummins b Starc');
+assert.equal(state.inning1.batterStats[101].dismissalText, 'not out');
+assert.equal(state.inning1.fallOfWickets.length, 1);
+assert.equal(state.inning1.fallOfWickets[0].batterName, 'Gill');
+assert.equal(state.inning1.fallOfWickets[0].scoreDisplay, '12/1');
+assert.equal(state.inning1.fallOfWickets[0].overDisplay, '0.4');
+assert.equal(state.inning1.oversHistory.length, 1);
+assert.equal(state.inning1.oversHistory[0].overNumber, 1);
+assert.equal(state.inning1.oversHistory[0].runs, 18);
+assert.deepEqual(state.inning1.oversHistory[0].batterNames, ['Rohit', 'Gill', 'Virat']);
+assert.equal(state.inning1.oversHistory[0].deliveries[0].kind, 'boundary');
+assert.equal(state.inning1.oversHistory[0].deliveries[1].subLabel, 'WD');
+assert.equal(state.inning1.oversHistory[0].deliveries[2].subLabel, '6BYE');
+assert.equal(state.inning1.oversHistory[0].deliveries[3].subLabel, '1LB');
+assert.equal(state.inning1.oversHistory[0].deliveries[4].circleLabel, 'OUT');
+assert.equal(state.inning1.oversHistory[0].deliveries[4].kind, 'wicket');
 
 console.log('ALL_SCORING_ENGINE_CHECKS_PASSED');
