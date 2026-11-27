@@ -31,6 +31,31 @@ export interface BatterStat {
     sixes: number;
     isOut: boolean;
     dismissalType: string | null;
+    dismissalText: string;
+}
+
+export interface FallOfWicketRecord {
+    wicketNumber: number;
+    playerOutId: number;
+    batterName: string;
+    scoreAtFall: number;
+    scoreDisplay: string;
+    overDisplay: string;
+}
+
+export interface OverDeliveryChip {
+    id: number;
+    circleLabel: string;
+    subLabel: string | null;
+    kind: 'normal' | 'boundary' | 'wicket' | 'extra';
+}
+
+export interface OverBreakdown {
+    overNumber: number;
+    runs: number;
+    bowlerNames: string[];
+    batterNames: string[];
+    deliveries: OverDeliveryChip[];
 }
 
 export interface BowlerStat {
@@ -104,6 +129,8 @@ export interface InningsDerivedState {
     bowlersList: BowlerStat[];
     partnerships: PartnershipRecord[];
     activePartnership: PartnershipRecord | null;
+    fallOfWickets: FallOfWicketRecord[];
+    oversHistory: OverBreakdown[];
     battedPlayerIds: number[];
     dismissedPlayerIds: number[];
     bowledPlayerIds: number[];
@@ -143,6 +170,58 @@ const formatOvers = (legalBalls: number): string =>
 const formatRate = (runs: number, legalBalls: number): string => {
     if (legalBalls <= 0) return '0.00';
     return (runs / (legalBalls / 6)).toFixed(2);
+};
+
+export const formatStrikeRate = (runs: number, balls: number): string =>
+    balls > 0 ? ((runs / balls) * 100).toFixed(2) : '0.00';
+
+export const formatDismissalText = (
+    type: string | null | undefined,
+    bowlerName: string,
+    fielderName?: string | null
+): string => {
+    const cleanFielder = fielderName?.trim() || '';
+    switch (type) {
+        case 'Bowled':
+            return `b ${bowlerName}`;
+        case 'Caught':
+            return cleanFielder ? `c ${cleanFielder} b ${bowlerName}` : `c & b ${bowlerName}`;
+        case 'LBW':
+            return `lbw b ${bowlerName}`;
+        case 'Stumped':
+            return cleanFielder ? `st ${cleanFielder} b ${bowlerName}` : `st b ${bowlerName}`;
+        case 'Run Out':
+            return cleanFielder ? `run out (${cleanFielder})` : 'run out';
+        case 'Hit Wicket':
+            return `hit wicket b ${bowlerName}`;
+        case 'Retired':
+            return 'retired';
+        default:
+            return type ? type.toLowerCase() : 'out';
+    }
+};
+
+export const formatOverDeliveryChip = (d: Delivery): OverDeliveryChip => {
+    const extraRuns = d.extras_runs || 0;
+    const total = (d.runs || 0) + extraRuns;
+    const isWicket = Boolean(d.is_wicket);
+
+    let subLabel: string | null = null;
+    if (d.extras_type === 'WD') subLabel = 'WD';
+    else if (d.extras_type === 'NB') subLabel = 'NB';
+    else if (d.extras_type === 'B') subLabel = `${extraRuns}BYE`;
+    else if (d.extras_type === 'LB') subLabel = `${extraRuns}LB`;
+
+    if (isWicket) {
+        return { id: d.id, circleLabel: 'OUT', subLabel, kind: 'wicket' };
+    }
+    if (d.extras_type) {
+        return { id: d.id, circleLabel: String(total), subLabel, kind: 'extra' };
+    }
+    if (d.runs === 4 || d.runs === 6) {
+        return { id: d.id, circleLabel: String(total), subLabel: null, kind: 'boundary' };
+    }
+    return { id: d.id, circleLabel: String(total), subLabel: null, kind: 'normal' };
 };
 
 export const formatDeliveryBadge = (d: Delivery): OverBallBadge => {
@@ -251,6 +330,7 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
                 sixes: 0,
                 isOut: false,
                 dismissalType: null,
+                dismissalText: 'not out',
             };
         }
     };
@@ -316,6 +396,13 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
     let lastCompletedOverBowlerId: number | null = null;
     let awaitingBowlerChange = false;
     let currentOverBadges: OverBallBadge[] = [];
+    const fallOfWickets: FallOfWicketRecord[] = [];
+    const oversHistory: OverBreakdown[] = [];
+    let currentOverRecord: OverBreakdown | null = null;
+
+    const addUniqueName = (arr: string[], name: string) => {
+        if (name && !arr.includes(name)) arr.push(name);
+    };
 
     for (const d of deliveries) {
         strikerId = d.batsman_id;
@@ -326,6 +413,19 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
         ensureBatter(strikerId);
         ensureBatter(nonStrikerId);
         ensureBowler(currentBowlerId);
+
+        if (!currentOverRecord) {
+            currentOverRecord = {
+                overNumber: oversHistory.length + 1,
+                runs: 0,
+                bowlerNames: [],
+                batterNames: [],
+                deliveries: [],
+            };
+        }
+        addUniqueName(currentOverRecord.bowlerNames, getName(currentBowlerId, 'Bowler'));
+        addUniqueName(currentOverRecord.batterNames, getName(strikerId, 'Batter'));
+        addUniqueName(currentOverRecord.batterNames, getName(nonStrikerId, 'Batter'));
 
         if (overBowlerId === null) {
             overBowlerId = currentBowlerId;
@@ -391,6 +491,8 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
         }
 
         currentOverBadges.push(formatDeliveryBadge(d));
+        currentOverRecord.runs += deliveryTotal;
+        currentOverRecord.deliveries.push(formatOverDeliveryChip(d));
 
         if (isLegal) {
             legalBalls += 1;
@@ -420,10 +522,26 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
             wickets += 1;
             const outId = d.player_out_id ?? d.batsman_id;
             dismissedSet.add(outId);
+            const bowlerName = getName(currentBowlerId, 'Bowler');
+            const fielderName = d.fielder_id ? getName(d.fielder_id, '') : '';
             if (batterStats[outId]) {
                 batterStats[outId].isOut = true;
                 batterStats[outId].dismissalType = d.wicket_type || 'Out';
+                batterStats[outId].dismissalText = formatDismissalText(
+                    d.wicket_type,
+                    bowlerName,
+                    fielderName
+                );
             }
+
+            fallOfWickets.push({
+                wicketNumber: wickets,
+                playerOutId: outId,
+                batterName: getName(outId, 'Batter'),
+                scoreAtFall: totalRuns,
+                scoreDisplay: `${totalRuns}/${wickets}`,
+                overDisplay: formatOvers(legalBalls),
+            });
 
             if (currentPart) {
                 currentPart.status = 'COMPLETED';
@@ -448,6 +566,10 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
             if (!overMixedBowlers && overBowlerId && overBowlerRuns === 0 && bowlerStats[overBowlerId]) {
                 bowlerStats[overBowlerId].maidens += 1;
             }
+            if (currentOverRecord) {
+                oversHistory.push(currentOverRecord);
+                currentOverRecord = null;
+            }
             lastCompletedOverBowlerId = currentBowlerId;
             awaitingBowlerChange = true;
             overLegalBalls = 0;
@@ -461,6 +583,10 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
             strikerId = nonStrikerId;
             nonStrikerId = tmp;
         }
+    }
+
+    if (currentOverRecord && currentOverRecord.deliveries.length > 0) {
+        oversHistory.push(currentOverRecord);
     }
 
     // Finalize derived bowler display fields
@@ -523,6 +649,8 @@ export function deriveInningsState(params: DeriveInningsParams): InningsDerivedS
         bowlersList: bowlerOrder.map((id) => bowlerStats[id]),
         partnerships,
         activePartnership,
+        fallOfWickets,
+        oversHistory,
         battedPlayerIds: Array.from(battedSet),
         dismissedPlayerIds: Array.from(dismissedSet),
         bowledPlayerIds: bowlerOrder,
