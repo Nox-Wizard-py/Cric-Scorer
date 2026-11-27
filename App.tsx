@@ -13,6 +13,7 @@ import TournamentsScreen from './screens/TournamentsScreen';
 import TeamsScreen from './screens/TeamsScreen';
 import HistoryScreen from './screens/HistoryScreen';
 import ScoringScreen from './screens/ScoringScreen';
+import ScorecardScreen from './screens/ScorecardScreen';
 import MatchResultScreen from './screens/MatchResultScreen';
 import { APP_FONT_FAMILY } from './constants/colors';
 import { ThemeProvider, useTheme } from './constants/theme';
@@ -95,6 +96,7 @@ function RootNavigator() {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Tabs" component={TabNavigator} />
         <Stack.Screen name="Scoring" component={ScoringScreen} />
+        <Stack.Screen name="Scorecard" component={ScorecardScreen} />
         <Stack.Screen name="MatchResult" component={MatchResultScreen} />
       </Stack.Navigator>
     </NavigationContainer>
