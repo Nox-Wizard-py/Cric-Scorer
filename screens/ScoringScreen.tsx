@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { db } from '../database/db';
 import { getOrCreatePlayer, normalizePlayerName } from '../database/playerIdentity';
 import { Delivery, Match, Player, Team } from '../database/types';
@@ -580,8 +581,27 @@ export default function ScoringScreen() {
             <AppHeader
                 compact
                 title="Live Scoring"
-                badge={activeState?.inning === 2 ? '2ND INNINGS' : '1ST INNINGS'}
                 onBack={() => navigation.goBack()}
+                rightAction={
+                    <TouchableOpacity
+                        onPress={() => navigation.navigate('Scorecard', { matchId })}
+                        style={[
+                            styles.headerActionBtn,
+                            { backgroundColor: theme.headerSubtle, borderColor: theme.primary },
+                        ]}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        activeOpacity={0.75}
+                        accessibilityRole="button"
+                        accessibilityLabel="Open full scorecard"
+                    >
+                        <MaterialCommunityIcons
+                            name="clipboard-text-outline"
+                            size={16}
+                            color={theme.scoreAccent}
+                        />
+                        <Text style={[styles.headerActionText, { color: theme.headerText }]}>Scorecard</Text>
+                    </TouchableOpacity>
+                }
             />
 
             {/* Enamel Scorebox Block */}
@@ -601,31 +621,53 @@ export default function ScoringScreen() {
                 </View>
 
                 <View style={styles.mainScoreRow}>
-                    <View>
-                        <Text style={[styles.mainScore, styles.tabularNum, { color: theme.scoreboxText }]}>
+                    <View style={styles.scoreCol}>
+                        <Text
+                            style={[styles.mainScore, styles.tabularNum, { color: theme.scoreboxText }]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.78}
+                        >
                             {activeState?.totalRuns ?? 0}
                             <Text style={{ color: theme.scoreAccent }}>/{activeState?.wickets ?? 0}</Text>
                         </Text>
-                        {activeState?.target !== null && activeState?.target !== undefined && (
-                            <View style={[styles.targetPill, { backgroundColor: theme.warning }]}>
-                                <Text style={[styles.targetPillText, styles.tabularNum, { color: theme.onWarning }]}>
-                                    TARGET {activeState.target} · NEED {activeState.runsNeeded} OFF{' '}
-                                    {activeState.ballsRemaining}B
-                                </Text>
-                            </View>
-                        )}
+                    </View>
+
+                    <View
+                        style={[
+                            styles.inningsCenterPill,
+                            { backgroundColor: theme.headerSubtle, borderColor: 'rgba(167, 192, 216, 0.25)' },
+                        ]}
+                    >
+                        <Text style={[styles.inningsCenterText, { color: theme.headerMuted }]} numberOfLines={1}>
+                            {activeState?.inning === 2 ? '2ND INNINGS' : '1ST INNINGS'}
+                        </Text>
                     </View>
 
                     <View style={styles.ratesBox}>
                         <Text style={[styles.oversText, styles.tabularNum, { color: theme.scoreboxText }]}>
                             {activeState?.oversDisplay ?? '0.0'}
                         </Text>
-                        <Text style={[styles.rateText, styles.tabularNum, { color: theme.scoreboxMuted }]}>
+                        <Text
+                            style={[styles.rateText, styles.tabularNum, { color: theme.scoreboxMuted }]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.85}
+                        >
                             CRR {activeState?.crr ?? '0.00'}
                             {activeState?.rrr ? ` · RRR ${activeState.rrr}` : ''}
                         </Text>
                     </View>
                 </View>
+
+                {activeState?.target !== null && activeState?.target !== undefined && (
+                    <View style={[styles.targetPill, { backgroundColor: theme.warning }]}>
+                        <Text style={[styles.targetPillText, styles.tabularNum, { color: theme.onWarning }]}>
+                            TARGET {activeState.target} · NEED {activeState.runsNeeded} OFF{' '}
+                            {activeState.ballsRemaining}B
+                        </Text>
+                    </View>
+                )}
             </View>
 
             {/* Over Ribbon Band */}
@@ -1624,7 +1666,42 @@ const styles = StyleSheet.create({
     mainScoreRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        alignItems: 'flex-end',
+        alignItems: 'center',
+        gap: 6,
+    },
+    scoreCol: {
+        flex: 1,
+        alignItems: 'flex-start',
+    },
+    inningsCenterPill: {
+        paddingHorizontal: 9,
+        paddingVertical: 5,
+        borderRadius: 999,
+        borderWidth: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    inningsCenterText: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 10,
+        fontWeight: '800',
+        letterSpacing: 0.5,
+    },
+    headerActionBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        minHeight: 40,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        borderRadius: 999,
+        borderWidth: 1,
+    },
+    headerActionText: {
+        fontFamily: APP_FONT_FAMILY,
+        fontSize: 12,
+        fontWeight: '800',
+        letterSpacing: 0.3,
     },
     mainScore: {
         fontFamily: APP_FONT_FAMILY,
@@ -1646,6 +1723,7 @@ const styles = StyleSheet.create({
         letterSpacing: 0.3,
     },
     ratesBox: {
+        flex: 1,
         alignItems: 'flex-end',
     },
     oversText: {
